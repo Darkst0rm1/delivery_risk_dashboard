@@ -1,0 +1,176 @@
+# =============================================================================
+# Daily Delivery Risk Dashboard — business rules configuration
+# -----------------------------------------------------------------------------
+# Everything data-driven about the dashboard lives here so the Python engine
+# stays generic. Edit this file (not the engine) to add customers, change
+# owners, retune escalation windows, or adjust the DSD priority mapping.
+#
+# Matching is case-insensitive; all patterns are matched against UPPER-CASED,
+# whitespace-collapsed Ship-to Name / Carrier Description values.
+# =============================================================================
+
+# ys value -> short site label shown on the dashboard and Issue Tracker.
+site_display:
+  "CALGARY WAREHOUSE": "Calgary"
+
+# Escalation windows (in days, measured against the "As of Date").
+escalation:
+  at_risk_days: 2                 # planned delivery / route departure within N days
+  amazon_cancel_critical_days: 2  # Amazon cancellation deadline within N days -> Critical
+  amazon_cancel_at_risk_days: 5   # Amazon cancellation deadline within N days -> At Risk
+  not_started_high_days: 2        # Not-Started priority: High if due within N days
+  not_started_medium_days: 5      # Not-Started priority: Medium if due within N days
+
+# Default consequence for any order whose customer is not configured below.
+default_consequence: "Delivery delay, customer out-of-stock risk and lost sales."
+
+# -----------------------------------------------------------------------------
+# Customer groups. First match wins, so list the most specific patterns first
+# (A&W-via-GFS before GFS). Every order that matches nothing falls through to
+# the built-in "Other" fallback group so urgent orders are never lost.
+#   priority: 1 (highest) .. 3 (lowest) — used to break ties / rank escalations.
+#   owner: leave blank to display "Unassigned" (we do not fabricate names).
+# -----------------------------------------------------------------------------
+customers:
+  - key: amazon
+    display: "Amazon"
+    priority: 1
+    owner: ""
+    consequence: "3% on-time delivery chargeback, possible automatic PO cancellation and lost sales."
+    amazon_deadline: true         # use Customer Dock Appointment Date as cancellation deadline
+    match:
+      ship_to_contains: ["AMAZON"]
+      ship_to_startswith: ["AMZ"]
+      carrier_contains: ["AMAZON PICKUP"]
+
+  - key: aw_via_gfs
+    display: "A&W (via GFS)"
+    priority: 1
+    owner: ""
+    consequence: "Customer out-of-stock risk and delayed replenishment."
+    match:
+      ship_to_contains: ["A&W"]
+
+  - key: gfs
+    display: "GFS"
+    priority: 1
+    owner: ""
+    consequence: "Missed pickup may push the order to the next delivery window and increase customer out-of-stock risk."
+    match:
+      ship_to_contains: ["GFS"]
+      carrier_contains: ["GFS CAPSTONE PICKUP"]
+
+  - key: sysco
+    display: "Sysco"
+    priority: 1
+    owner: ""
+    consequence: "Missed pickup slot may delay delivery until the next available window."
+    match:
+      ship_to_contains: ["SYSCO"]
+
+  - key: calgary_coop
+    display: "Calgary Co-op"
+    priority: 1
+    owner: ""
+    consequence: "Missed delivery and customer out-of-stock risk."
+    match:
+      ship_to_contains: ["CALGARY CO-OP", "CALGARY CO OP"]
+
+  - key: save_on
+    display: "Save On Foods"
+    priority: 1
+    owner: ""
+    consequence: "Chargebacks, fines and customer out-of-stock risk."
+    match:
+      ship_to_contains: ["SAVE ON", "SAVE-ON", "SAVEON"]
+
+  - key: associated_grocers
+    display: "Associated Grocers"
+    priority: 1
+    owner: ""
+    consequence: "Late-delivery fines and lost sales."
+    match:
+      ship_to_contains: ["ASSOCIATED GROCERS"]
+
+  - key: federated_coop
+    display: "Federated Co-op"
+    priority: 1
+    owner: ""
+    consequence: "Fines, delayed replenishment and lost sales."
+    match:
+      ship_to_startswith: ["FCL"]
+      ship_to_contains: ["FEDERATED CO-OP", "FEDERATED CO OP"]
+
+  - key: sobeys_group
+    display: "Sobeys/Safeway/FreshCo"
+    priority: 1
+    owner: ""
+    consequence: "Empty shelves, customer out-of-stock risk and lost sales."
+    match:
+      ship_to_contains: ["SOBEYS", "CANADA SAFEWAY", "FRESHCO"]
+
+  - key: pratts
+    display: "Pratts"
+    priority: 1
+    owner: ""
+    consequence: "Missed delivery or pickup window and delayed customer replenishment."
+    match:
+      ship_to_contains: ["PRATT"]
+
+# Fallback group for any unconfigured customer. Never removed.
+fallback:
+  key: other
+  display: "Other / Unclassified"
+  priority: 3
+  owner: ""
+  consequence: "Delivery delay, customer out-of-stock risk and lost sales."
+
+# -----------------------------------------------------------------------------
+# Customer detail reports (Excel sheets + Customer Reports tab). Each pulls the
+# orders assigned to the listed customer groups. facility_in optionally
+# restricts to certain Facility Code values (PFG WHSE = warehouse-only).
+# comments_column prepends a "Comments" column; amazon_deadline fills it with
+# the cancellation-deadline note.
+# -----------------------------------------------------------------------------
+detail_reports:
+  - name: "AMZ"
+    customers: [amazon]
+    comments_column: true
+    amazon_deadline: true
+  - name: "Andrew Tab"        # special filter, handled in engine
+    special: "andrew_tab"
+  - name: "Andrew Tab 2"      # special filter, handled in engine
+    special: "andrew_tab_2"
+  - name: "PFG WHSE"
+    customers: [save_on, associated_grocers]
+    facility_in: ["Warehouse"]
+  - name: "Calgary CO-OP"
+    customers: [calgary_coop]
+    comments_column: true
+  - name: "Sysco"
+    customers: [sysco]
+  - name: "GFS"
+    customers: [gfs, aw_via_gfs]
+  - name: "Pratts"
+    customers: [pratts]
+
+# -----------------------------------------------------------------------------
+# DSD Priorities mapping. Ship-to Name patterns (case-insensitive substring)
+# grouped into Priority 1 / Priority 2. An order matching any Priority 1
+# pattern outranks a Priority 2 match. Add / remove patterns freely.
+# -----------------------------------------------------------------------------
+dsd_priorities:
+  "Priority 1":
+    - "ITALIAN CENTRE"
+    - "BRITISH FOOD CO"
+    - "MANITOBA LIQUOR AND LOTTERIES"
+    - "PRATT'S WHOLESALE"
+    - "CONNECT LOGISTICS"
+  "Priority 2":
+    - "K & K FOODLINER"
+    - "BEN'S MEATS"
+    - "BRIDGELAND MARKET"
+    - "CALABRIA MARKET"
+    - "CANADA SAFEWAY"
+    - "DELUCA BROS FOODS"
+    - "EDELWEISS IMPORTS"
