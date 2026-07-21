@@ -549,6 +549,30 @@ def test_duplicate_delivery_is_not_double_counted_in_warehouse_figures():
     assert result.issue_tracker["Order Count"].sum() == 1
 
 
+def test_savings_is_completed_value_and_adjusted_is_the_remainder():
+    buf = _rows(
+        {"ys": "Calgary Warehouse", "LE Delivery": "DONE1", "Sales Order Total": "2500",
+         "Goods Issue": "Completed", "Picking in %": "100"},
+        {"ys": "Calgary Warehouse", "LE Delivery": "OPEN1", "Sales Order Total": "7500",
+         "Goods Issue": "Not Started", "Picking in %": "0"},
+    )
+    calgary = _process(buf).all_plants_summary.iloc[0]
+    assert calgary["Total Order Value"] == 10000.0
+    assert calgary["Savings $"] == 2500.0
+    assert calgary["Savings %"] == 25.0
+    # Adjusted Order Value is the value still open on the floor.
+    assert calgary["Adjusted Order Value"] == 7500.0
+    assert (calgary["Savings $"] + calgary["Adjusted Order Value"]
+            == calgary["Total Order Value"])
+
+
+def test_savings_percent_is_zero_when_there_is_no_order_value():
+    buf = _rows({"ys": "Calgary Warehouse", "LE Delivery": "Z1", "Sales Order Total": "0"})
+    calgary = _process(buf).all_plants_summary.iloc[0]
+    assert calgary["Savings %"] == 0.0
+    assert calgary["Adjusted Order Value"] == 0.0
+
+
 def test_customer_reports_are_only_created_where_records_exist():
     sections = {s.site: s for s in _process(_multi_site()).site_sections}
     assert all(not df.empty for s in sections.values() for df in s.reports.values())

@@ -191,7 +191,10 @@ with tab_exec:
         build_all_plants_summary(fdf, rules, tracker_view),
         use_container_width=True, hide_index=True,
         column_config={
+            "Savings $": st.column_config.NumberColumn(format="$%.0f"),
+            "Savings %": st.column_config.NumberColumn(format="%.1f%%"),
             "Total Order Value": st.column_config.NumberColumn(format="$%.0f"),
+            "Adjusted Order Value": st.column_config.NumberColumn(format="$%.0f"),
             "Value at Risk": st.column_config.NumberColumn(format="$%.0f"),
             "Not Started Value": st.column_config.NumberColumn(format="$%.0f"),
         },

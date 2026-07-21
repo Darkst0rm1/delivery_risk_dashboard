@@ -39,16 +39,21 @@ FILL_READY = PatternFill("solid", fgColor="D9EAD3")       # green-ish
 CURRENCY_FMT = '"$"#,##0'
 DATE_FMT = "MM/DD/YYYY"
 PCT_FMT = '0"%"'
+# Savings % is often a small share of a large book, so it keeps one decimal
+# rather than rounding a real 1.8% down to a flat "2%".
+PCT1_FMT = '0.0"%"'
 
 _CURRENCY_COLS = {
     "Total Price", "Sales Order Total",
-    "Total Order Value", "Value at Risk", "Not Started Value",   # All Plants Summary
+    "Total Order Value", "Adjusted Order Value", "Savings $",    # All Plants Summary
+    "Value at Risk", "Not Started Value",
 }
 _DATE_COLS = {
     "Warehouse Task Creat", "Route Depart. Date", "Planned Dlv. Date",
     "Customer Dock Appointment Date", "Due Date",
 }
 _PCT_COLS = {"Picking in %", "picking_pct"}
+_PCT1_COLS = {"Savings %"}
 _WRAP_COLS = {"Issue", "Consequence / Risk", "Latest Update"}
 
 # Whole-number columns; listed so a blank cell writes 0 rather than an empty
@@ -156,6 +161,8 @@ def _write_sheet(
             fmt = DATE_FMT
         elif col in _PCT_COLS:
             fmt = PCT_FMT
+        elif col in _PCT1_COLS:
+            fmt = PCT1_FMT
         if fmt:
             for r in range(2, len(records) + 2):
                 ws.cell(row=r, column=idx).number_format = fmt

@@ -33,7 +33,8 @@ ISSUE_TRACKER_COLUMNS = [
 # All Plants Summary column order.
 SUMMARY_COLUMNS = [
     "Site", "Total Orders", "Open Orders", "Critical", "At Risk", "Not Started",
-    "Late", "Route Departure Missed", "Issues", "Total Order Value",
+    "Late", "Route Departure Missed", "Issues", "Savings $", "Savings %",
+    "Total Order Value", "Adjusted Order Value",
     "Value at Risk", "Not Started Value",
 ]
 
@@ -481,6 +482,12 @@ def _summary_row(label: str, orders: pd.DataFrame, tracker: pd.DataFrame) -> dic
     df = _unique_orders(orders)
     escalating = df[df["risk_status"].isin(R.ESCALATION_STATUSES)]
     not_started = df[df["is_not_started"]]
+    # "Savings" = value already banked, i.e. orders whose Goods Issue is
+    # Completed. Subtracting it from Total Order Value leaves the value still
+    # open on the floor, which is what Adjusted Order Value reports.
+    completed = df[df["is_goods_issue_complete"]]
+    total_value = float(df["Sales Order Total"].sum())
+    savings = float(completed["Sales Order Total"].sum())
     return {
         "Site": label,
         "Total Orders": int(df["LE Delivery"].nunique()),
@@ -492,7 +499,10 @@ def _summary_row(label: str, orders: pd.DataFrame, tracker: pd.DataFrame) -> dic
         "Route Departure Missed": int(
             df.loc[df["is_route_departure_missed"], "LE Delivery"].nunique()),
         "Issues": int(len(tracker)),
-        "Total Order Value": float(df["Sales Order Total"].sum()),
+        "Savings $": savings,
+        "Savings %": round(savings / total_value * 100, 1) if total_value else 0.0,
+        "Total Order Value": total_value,
+        "Adjusted Order Value": total_value - savings,
         "Value at Risk": float(escalating["Sales Order Total"].sum()),
         "Not Started Value": float(not_started["Sales Order Total"].sum()),
     }
