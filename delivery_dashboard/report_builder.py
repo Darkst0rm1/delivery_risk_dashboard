@@ -482,10 +482,12 @@ def _summary_row(label: str, orders: pd.DataFrame, tracker: pd.DataFrame) -> dic
     df = _unique_orders(orders)
     escalating = df[df["risk_status"].isin(R.ESCALATION_STATUSES)]
     not_started = df[df["is_not_started"]]
-    # "Savings" = value already banked, i.e. orders whose Goods Issue is
-    # Completed. Subtracting it from Total Order Value leaves the value still
-    # open on the floor, which is what Adjusted Order Value reports.
-    completed = df[df["is_goods_issue_complete"]]
+    # "Savings" = value already picked (Picking in % >= 100), whether or not the
+    # Goods Issue has posted. Subtracting it from Total Order Value leaves the
+    # value still to be picked, which is what Adjusted Order Value reports.
+    # NB: this is deliberately a different test from is_open / risk_status,
+    # which stay keyed on Goods Issue — only these three columns use picking.
+    completed = df[df["is_picking_complete"]]
     total_value = float(df["Sales Order Total"].sum())
     savings = float(completed["Sales Order Total"].sum())
     return {
