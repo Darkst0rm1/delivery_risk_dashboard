@@ -95,8 +95,17 @@ _HEADER_ALIASES: dict[str, str] = {
     "shpg cond desc": "Shpg Cond. Desc",
     "shipping cond": "Shipping Cond.",
     # Some exports label the site column "Warehouse" or "Site" instead of "ys".
+    # Getting this right matters more than it looks: the whole download is
+    # organized by warehouse, so an unrecognized header collapses every order
+    # into a single "Unknown" section.
     "warehouse": "ys",
     "site": "ys",
+    "plant": "ys",
+    "werks": "ys",
+    # The daily SAPUI5 export ships this column as plain "Description", holding
+    # values like "Calgary Warehouse". Distinct from "Carrier Description" and
+    # "Shpg Cond. Desc", which normalize to their own canonical names.
+    "description": "ys",
 }
 
 _WS_RE = re.compile(r"\s+")
@@ -118,14 +127,18 @@ def _normalize_header(name: Any) -> str:
 _CANON_BY_NORM: dict[str, str] = {_normalize_header(c): c for c in CANONICAL_COLUMNS}
 
 
-def resolve_column(header: Any) -> str | None:
-    """Return the canonical name for a raw header, or None if unrecognized."""
+def resolve_column(header: Any, exact_only: bool = False) -> str | None:
+    """Return the canonical name for a raw header, or None if unrecognized.
+
+    With ``exact_only`` the alias table is skipped, so only a header that *is*
+    a canonical name matches.
+    """
     norm = _normalize_header(header)
     if norm in _CANON_BY_NORM:
         return _CANON_BY_NORM[norm]
-    if norm in _HEADER_ALIASES:
-        return _HEADER_ALIASES[norm]
-    return None
+    if exact_only:
+        return None
+    return _HEADER_ALIASES.get(norm)
 
 
 def load_sap_export(file: Any) -> pd.DataFrame:
@@ -166,13 +179,19 @@ def load_sap_export(file: Any) -> pd.DataFrame:
 
     # Map each raw column to its canonical name; keep the first occurrence of
     # each canonical (defends against duplicate columns after aliasing).
+    # Exact canonical headers are claimed in a first pass so a loose alias
+    # ("Description" -> ys) can never take the slot of a column literally
+    # named "ys" that happens to sit further right.
     rename: dict[Any, str] = {}
     seen: set[str] = set()
-    for col in raw.columns:
-        canon = resolve_column(col)
-        if canon and canon not in seen:
-            rename[col] = canon
-            seen.add(canon)
+    for exact_only in (True, False):
+        for col in raw.columns:
+            if col in rename:
+                continue
+            canon = resolve_column(col, exact_only=exact_only)
+            if canon and canon not in seen:
+                rename[col] = canon
+                seen.add(canon)
 
     df = raw.rename(columns=rename)
     df = df[[c for c in df.columns if c in seen]].copy()

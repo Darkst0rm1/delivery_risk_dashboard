@@ -397,6 +397,36 @@ def test_new_upload_replaces_old_data():
 
 
 # ---------------------------------------------------------------------------
+# Warehouse label resolution
+# ---------------------------------------------------------------------------
+def test_site_label_treats_every_pandas_null_as_unknown():
+    rules = load_ruleset()
+    # pd.NA / NaT are not floats, so a naive isinstance check let the literal
+    # text "<NA>" through and it showed up as a warehouse name.
+    for missing in (None, pd.NA, pd.NaT, float("nan"), "", "   "):
+        assert rules.site_label(missing) == "Unknown", repr(missing)
+    assert rules.site_label("Calgary Warehouse") == "Calgary"
+
+
+def test_missing_site_column_gives_one_unknown_warehouse_and_a_warning():
+    headers = [h for h in _DEFAULTS if h != "ys"]
+    rec = dict(_DEFAULTS)
+    result = _process(_xlsx(headers, [[rec[h] for h in headers]]))
+    assert result.sites == ["Unknown"]
+    assert any("warehouse column" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize("header", ["ys", "Site", "Warehouse", "Plant"])
+def test_site_column_is_recognized_under_its_common_names(header):
+    headers = [header] + [h for h in _DEFAULTS if h != "ys"]
+    rec = dict(_DEFAULTS)
+    rec[header] = "Calgary Warehouse"
+    result = _process(_xlsx(headers, [[rec[h] for h in headers]]))
+    assert result.sites == ["Calgary"]
+    assert result.warnings == []
+
+
+# ---------------------------------------------------------------------------
 # Safe sheet names
 # ---------------------------------------------------------------------------
 def test_sanitize_removes_invalid_characters():

@@ -88,6 +88,15 @@ def process_export(
     all_plants_summary = report_builder.build_all_plants_summary(orders, rules, issue_tracker)
 
     warnings: list[str] = []
+    # The whole workbook is organized by warehouse, so silently landing every
+    # order in one "Unknown" section would be easy to miss. Say so instead.
+    if not orders.empty and set(orders["site"].unique()) == {"Unknown"}:
+        warnings.append(
+            "No warehouse column was recognized in this export, so every order is "
+            "grouped under a single **Unknown** warehouse. The site column should be "
+            "named ys, Site, Warehouse or Plant — tell me what yours is called and it "
+            "can be added to the header aliases."
+        )
     if not validation_errors.empty:
         warnings.append(
             f"{len(validation_errors)} record(s) could not be fully parsed — "

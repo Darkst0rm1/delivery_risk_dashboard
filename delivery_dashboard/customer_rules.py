@@ -21,10 +21,28 @@ DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "config" / "delivery_
 
 _WS_RE = re.compile(r"\s+")
 
+# What a missing value stringifies into. pandas has several null sentinels and
+# only ``float('nan')`` is a float, so an isinstance check misses ``pd.NA`` and
+# ``pd.NaT`` — and str() then yields the literal text "<NA>" / "NaT", which
+# would otherwise end up on screen as a warehouse name.
+_NULL_TEXT = {"", "NAN", "NAT", "NONE", "<NA>"}
+
+
+def _is_missing(value: Any) -> bool:
+    """True for None, any pandas null, or the text one of them stringifies to."""
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):  # non-scalar (array/list) — not a null
+        pass
+    return str(value).strip().upper() in _NULL_TEXT
+
 
 def _norm(value: Any) -> str:
     """Upper-case, whitespace-collapsed key for case-insensitive matching."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+    if _is_missing(value):
         return ""
     return _WS_RE.sub(" ", str(value)).strip().upper()
 
@@ -89,12 +107,20 @@ class Ruleset:
         return self._by_key.get(key, self.fallback)
 
     def site_label(self, ys: Any) -> str:
+        """Short warehouse label for a raw ``ys`` value.
+
+        Missing or blank -> "Unknown", so an export without a recognized
+        warehouse column produces one clearly-labelled section rather than a
+        section called "<NA>".
+        """
         norm = _norm(ys)
-        if norm in {k.upper(): v for k, v in self.site_display.items()}:
-            return {k.upper(): v for k, v in self.site_display.items()}[norm]
+        if not norm:
+            return "Unknown"
+        lookup = {k.upper(): v for k, v in self.site_display.items()}
+        if norm in lookup:
+            return lookup[norm]
         # Fall back to the first word ("Calgary Warehouse" -> "Calgary").
-        raw = "" if ys is None else str(ys).strip()
-        return raw.split()[0] if raw else "Unknown"
+        return str(ys).strip().split()[0]
 
     def ordered_sites(self, detected: Any) -> list[str]:
         """Unique detected site labels in workbook order.
