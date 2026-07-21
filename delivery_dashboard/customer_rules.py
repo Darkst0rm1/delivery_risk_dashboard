@@ -77,6 +77,7 @@ class Ruleset:
     site_display: dict[str, str]
     escalation: dict[str, int]
     default_consequence: str
+    site_order: list[str] = field(default_factory=list)
     _by_key: dict[str, CustomerRule] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -94,6 +95,17 @@ class Ruleset:
         # Fall back to the first word ("Calgary Warehouse" -> "Calgary").
         raw = "" if ys is None else str(ys).strip()
         return raw.split()[0] if raw else "Unknown"
+
+    def ordered_sites(self, detected: Any) -> list[str]:
+        """Unique detected site labels in workbook order.
+
+        Sites named in ``site_order`` come first in that order; anything else
+        found in the export follows alphabetically, so an unconfigured
+        warehouse still gets its own section.
+        """
+        unique = list(dict.fromkeys(str(s) for s in detected if str(s).strip()))
+        rank = {s.casefold(): i for i, s in enumerate(self.site_order)}
+        return sorted(unique, key=lambda s: (rank.get(s.casefold(), len(rank)), s.casefold()))
 
     # -- classification ------------------------------------------------------
     def classify(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -195,4 +207,5 @@ def load_ruleset(path: str | Path | None = None) -> Ruleset:
         site_display={str(k): str(v) for k, v in (cfg.get("site_display", {}) or {}).items()},
         escalation={str(k): int(v) for k, v in (cfg.get("escalation", {}) or {}).items()},
         default_consequence=default_consequence,
+        site_order=[str(s) for s in (cfg.get("site_order", []) or [])],
     )

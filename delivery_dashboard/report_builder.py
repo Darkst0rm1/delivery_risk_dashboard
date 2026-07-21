@@ -4,9 +4,14 @@ Every output is regenerated from the enriched order frame — no state is carrie
 between uploads. Issue text and "Latest Update" strings are deterministic
 functions of the current data (plus the as_of / now timestamps), never
 hard-coded from the prototype.
+
+The workbook is organized by warehouse: :func:`build_site_sections` slices the
+orders per site, and every combined ("All Plants") output is the union of those
+slices, so a warehouse sheet and the combined sheet can never disagree.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -21,9 +26,19 @@ EDMONTON = ZoneInfo("America/Edmonton")
 
 # Issue Tracker column order (must match the Excel sheet exactly).
 ISSUE_TRACKER_COLUMNS = [
-    "Site", "Customer", "Issue", "Consequence / Risk", "Owner",
+    "Site", "Customer", "Issue Type", "Issue", "Consequence / Risk", "Owner",
     "Due Date", "Status", "Total Price", "Order Count", "Latest Update", "Detail Report",
 ]
+
+# All Plants Summary column order.
+SUMMARY_COLUMNS = [
+    "Site", "Total Orders", "Open Orders", "Critical", "At Risk", "Not Started",
+    "Late", "Route Departure Missed", "Issues", "Total Order Value",
+    "Value at Risk", "Not Started Value",
+]
+
+# Label of the roll-up row at the bottom of the All Plants Summary.
+ALL_PLANTS = "All Plants"
 
 # Not Started report column order.
 NOT_STARTED_COLUMNS = [
@@ -58,6 +73,18 @@ def _fmt_mmdd(ts) -> str:
     return pd.Timestamp(ts).strftime("%m/%d")
 
 
+def _unique_orders(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per LE Delivery.
+
+    The cleaner already de-duplicates, so this is a guard rather than a fix:
+    every count and every dollar total in the warehouse sheets goes through it
+    so a duplicate can never inflate a figure.
+    """
+    if df is None or df.empty or "LE Delivery" not in df.columns:
+        return df
+    return df.drop_duplicates(subset=["LE Delivery"])
+
+
 def _due_dates(df: pd.DataFrame, rules: Ruleset) -> pd.Series:
     """Per-order 'earliest relevant deadline' timestamp.
 
@@ -74,15 +101,22 @@ def _due_dates(df: pd.DataFrame, rules: Ruleset) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
-# Issue text (per customer, deterministic)
+# Issue text (per issue type, deterministic)
 # ---------------------------------------------------------------------------
+# Tracker rows are now split by issue type, so the sentence is driven by the
+# issue type and names the customer, rather than one per-customer paragraph
+# that would report "0 late, 0 not started" on a deadline-only row. The
+# customer-specific angle survives in the Consequence / Risk column, which
+# still comes straight from the YAML rules.
 def _counts(affected: pd.DataFrame) -> dict:
+    picking = pd.to_numeric(affected.get("picking_pct"), errors="coerce").fillna(0)
     return {
         "count": int(affected["LE Delivery"].nunique()),
         "not_started": int(affected["is_not_started"].sum()),
         "late": int(affected["is_late"].sum()),
         "in_progress": int(affected["is_picking_in_progress"].sum()),
         "missed_route": int(affected["is_route_departure_missed"].sum()),
+        "unpicked": int((picking < 100).sum()),
     }
 
 
@@ -96,66 +130,77 @@ def _nearest_deadline(affected: pd.DataFrame) -> str:
     return _fmt_date(dock.min()) if not dock.empty else "N/A"
 
 
-def _issue_amazon(a: pd.DataFrame) -> str:
+def _lowest_picked(affected: pd.DataFrame) -> float:
+    pct = pd.to_numeric(affected.get("picking_pct"), errors="coerce").dropna()
+    return float(pct.min()) if not pct.empty else 0.0
+
+
+def _delivery_ids(affected: pd.DataFrame, limit: int = 5) -> str:
+    """Name the affected deliveries when there are few enough to act on."""
+    ids = sorted({str(x) for x in affected["LE Delivery"].dropna() if str(x).strip()})
+    if not ids or len(ids) > limit:
+        return ""
+    return " Affected LE Deliveries: " + ", ".join(ids) + "."
+
+
+def _issue_deadline_passed(a: pd.DataFrame, customer: str) -> str:
+    return (f"{_counts(a)['count']} {customer} order(s) are past the customer cancellation "
+            f"deadline (earliest {_nearest_deadline(a)}).")
+
+
+def _issue_late(a: pd.DataFrame, customer: str) -> str:
+    return (f"{_counts(a)['count']} {customer} order(s) are past the planned delivery date "
+            f"(earliest {_earliest_planned(a)}) with Goods Issue still open.")
+
+
+def _issue_route_missed(a: pd.DataFrame, customer: str) -> str:
+    return (f"{_counts(a)['count']} {customer} order(s) missed the route departure window and "
+            f"are not fully picked (lowest {_lowest_picked(a):.0f}% picked).")
+
+
+def _issue_deadline_soon(a: pd.DataFrame, customer: str) -> str:
     c = _counts(a)
-    return (f"{c['count']} Amazon orders are at risk. {c['not_started']} have not started "
-            f"and {c['late']} are late. The nearest cancellation deadline is {_nearest_deadline(a)}.")
+    return (f"{c['count']} {customer} order(s) face a cancellation deadline on or before "
+            f"{_nearest_deadline(a)} and {c['unpicked']} are not fully picked.")
 
 
-def _issue_gfs(a: pd.DataFrame) -> str:
+def _issue_not_started(a: pd.DataFrame, customer: str) -> str:
+    return (f"{_counts(a)['count']} {customer} order(s) are still at 0% picked. "
+            f"Earliest planned delivery {_earliest_planned(a)}.")
+
+
+def _issue_picking_behind(a: pd.DataFrame, customer: str) -> str:
+    return (f"{_counts(a)['count']} {customer} order(s) are only partially picked (lowest "
+            f"{_lowest_picked(a):.0f}%) with a deadline approaching. Earliest planned "
+            f"delivery {_earliest_planned(a)}.")
+
+
+def _issue_awaiting_gi(a: pd.DataFrame, customer: str) -> str:
+    return (f"{_counts(a)['count']} {customer} order(s) are fully picked and awaiting Goods "
+            f"Issue. Earliest planned delivery {_earliest_planned(a)}.")
+
+
+def _issue_general(a: pd.DataFrame, customer: str) -> str:
     c = _counts(a)
-    return (f"{c['count']} GFS pickup orders require attention. {c['missed_route']} missed the "
-            f"route departure window and {c['not_started']} remain at 0% picked.")
+    return (f"{c['count']} {customer} order(s) require attention: {c['not_started']} not "
+            f"started, {c['late']} late, {c['in_progress']} in progress. Earliest planned "
+            f"delivery: {_earliest_planned(a)}.")
 
 
-def _issue_aw(a: pd.DataFrame) -> str:
-    pct = pd.to_numeric(a.get("picking_pct"), errors="coerce").fillna(0)
-    worst = pct.min() if not pct.empty else 0
-    return (f"A&W order within the GFS pickup group is delayed and remains at "
-            f"{worst:.0f}% picked.")
-
-
-def _issue_sysco(a: pd.DataFrame) -> str:
-    c = _counts(a)
-    return (f"{c['count']} Sysco orders require attention. {c['not_started']} remain at 0% picked "
-            f"and {c['missed_route']} have missed the pickup window.")
-
-
-def _issue_save_on(a: pd.DataFrame) -> str:
-    c = _counts(a)
-    return (f"{c['count']} Save On Foods warehouse orders are delayed or at risk. "
-            f"{c['not_started']} have not started.")
-
-
-def _issue_associated(a: pd.DataFrame) -> str:
-    c = _counts(a)
-    base = (f"{c['count']} Associated Grocers orders require attention. "
-            f"{c['not_started']} have not started and {c['late']} are late.")
-    ids = [str(x) for x in a["LE Delivery"].dropna().unique()]
-    if 0 < len(ids) <= 5:
-        base += " Affected LE Deliveries: " + ", ".join(ids) + "."
-    return base
-
-
-def _issue_general(a: pd.DataFrame) -> str:
-    c = _counts(a)
-    return (f"{c['count']} orders require attention: {c['not_started']} not started, "
-            f"{c['late']} late, {c['in_progress']} in progress. "
-            f"Earliest planned delivery: {_earliest_planned(a)}.")
-
-
-_ISSUE_BUILDERS: dict[str, Callable[[pd.DataFrame], str]] = {
-    "amazon": _issue_amazon,
-    "gfs": _issue_gfs,
-    "aw_via_gfs": _issue_aw,
-    "sysco": _issue_sysco,
-    "save_on": _issue_save_on,
-    "associated_grocers": _issue_associated,
+_ISSUE_BUILDERS: dict[str, Callable[[pd.DataFrame, str], str]] = {
+    R.IT_DEADLINE_PASSED: _issue_deadline_passed,
+    R.IT_LATE: _issue_late,
+    R.IT_ROUTE_MISSED: _issue_route_missed,
+    R.IT_DEADLINE_SOON: _issue_deadline_soon,
+    R.IT_NOT_STARTED: _issue_not_started,
+    R.IT_PICKING_BEHIND: _issue_picking_behind,
+    R.IT_AWAITING_GI: _issue_awaiting_gi,
 }
 
 
-def _issue_text(group_key: str, affected: pd.DataFrame) -> str:
-    return _ISSUE_BUILDERS.get(group_key, _issue_general)(affected)
+def _issue_text(issue_type: str, affected: pd.DataFrame, customer: str) -> str:
+    builder = _ISSUE_BUILDERS.get(issue_type, _issue_general)
+    return builder(affected, customer) + _delivery_ids(affected)
 
 
 def _latest_update(affected: pd.DataFrame, rules: Ruleset, now: datetime) -> str:
@@ -182,7 +227,12 @@ def build_issue_tracker(
     now: datetime | None = None,
     include_non_escalated: bool = False,
 ) -> pd.DataFrame:
-    """One summarized row per escalating customer group.
+    """One summarized row per Site x Customer Group x Issue Type.
+
+    Splitting on all three is what keeps an Amazon problem in Calgary on its
+    own row rather than merged with an Amazon problem in Mississauga, and a
+    late delivery separate from a missed route departure. It also means a
+    warehouse tracker is exactly the subset of this tracker for that site.
 
     By default only groups with at least one Critical/At Risk order appear
     (escalation-only). ``include_non_escalated=True`` also lists groups whose
@@ -201,32 +251,42 @@ def build_issue_tracker(
         return pd.DataFrame(columns=cols)
 
     rows = []
-    for key, grp in wanted.groupby("customer_group", sort=False):
+    for (site, key, issue_type), grp in wanted.groupby(
+        ["site", "customer_group", "issue_type"], sort=False,
+    ):
         rule = rules.rule(key)
-        has_critical = (grp["risk_status"] == R.CRITICAL).any()
+        affected = _unique_orders(grp)
+        has_critical = (affected["risk_status"] == R.CRITICAL).any()
         status = R.CRITICAL if has_critical else (
-            R.AT_RISK if (grp["risk_status"] == R.AT_RISK).any() else grp["risk_status"].iloc[0]
+            R.AT_RISK if (affected["risk_status"] == R.AT_RISK).any() else affected["risk_status"].iloc[0]
         )
-        due = _due_dates(grp, rules).dropna()
-        site_mode = grp["site"].mode()
+        due = _due_dates(affected, rules).dropna()
+        report_mode = affected["customer_report"].mode()
         rows.append({
-            "Site": site_mode.iloc[0] if not site_mode.empty else "",
+            "Site": site,
             "Customer": rule.display,
-            "Issue": _issue_text(key, grp),
+            "Issue Type": issue_type,
+            "Issue": _issue_text(issue_type, affected, rule.display),
             "Consequence / Risk": rule.consequence or rules.default_consequence,
             "Owner": rule.owner_or_unassigned(),
             "Due Date": due.min() if not due.empty else pd.NaT,
             "Status": status,
-            "Total Price": float(grp["Sales Order Total"].sum()),
-            "Order Count": int(grp["LE Delivery"].nunique()),
-            "Latest Update": _latest_update(grp, rules, now),
-            "Detail Report": grp["customer_report"].mode().iloc[0] if not grp["customer_report"].mode().empty else "",
+            "Total Price": float(affected["Sales Order Total"].sum()),
+            "Order Count": int(affected["LE Delivery"].nunique()),
+            "Latest Update": _latest_update(affected, rules, now),
+            "Detail Report": report_mode.iloc[0] if not report_mode.empty else "",
             "_status_rank": 0 if has_critical else 1,
+            "_issue_rank": R.issue_type_rank(issue_type),
         })
 
     out = pd.DataFrame(rows)
-    out = out.sort_values(["_status_rank", "Total Price"], ascending=[True, False])
-    out = out.drop(columns=["_status_rank"]).reset_index(drop=True)
+    # Stable so that filtering the All Plants tracker down to one site gives
+    # the same row order as building that site's tracker on its own.
+    out = out.sort_values(
+        ["_status_rank", "_issue_rank", "Total Price"], ascending=[True, True, False],
+        kind="stable",
+    )
+    out = out.drop(columns=["_status_rank", "_issue_rank"]).reset_index(drop=True)
     return out[cols]
 
 
@@ -291,8 +351,12 @@ def _build_customer_report(orders: pd.DataFrame, spec, rules: Ruleset) -> pd.Dat
         else:
             comments = pd.Series("", index=body.index)
         body.insert(0, "Comments", comments.values)
+    body = body.reset_index(drop=True)
+    # Flags the exporter reads instead of matching on sheet name — the sheets
+    # are now called e.g. "Calgary - AMZ", so name matching would miss them.
     body.attrs["is_customer_report"] = True
-    return body.reset_index(drop=True)
+    body.attrs["amazon_note"] = bool(spec.amazon_deadline)
+    return body
 
 
 def build_andrew_tab(orders: pd.DataFrame, as_of: date) -> pd.DataFrame:
@@ -355,3 +419,108 @@ def build_detail_reports(orders: pd.DataFrame, rules: Ruleset, as_of: date) -> d
         elif spec.customers:
             reports[spec.name] = _build_customer_report(orders, spec, rules)
     return reports
+
+
+# ---------------------------------------------------------------------------
+# Per-warehouse sections
+# ---------------------------------------------------------------------------
+@dataclass
+class SiteSection:
+    """Every sheet one warehouse contributes to the workbook."""
+
+    site: str
+    issue_tracker: pd.DataFrame
+    not_started: pd.DataFrame
+    orders: pd.DataFrame                        # all unique deliveries for the site
+    reports: dict[str, pd.DataFrame] = field(default_factory=dict)  # non-empty only
+
+
+def build_site_sections(
+    orders: pd.DataFrame,
+    rules: Ruleset,
+    as_of: date,
+    now: datetime | None = None,
+) -> list[SiteSection]:
+    """One :class:`SiteSection` per warehouse present in this export.
+
+    Sections are discovered from the data, so a fourth (or first-ever)
+    warehouse appearing in tomorrow's export gets its own sheets with no code
+    change. A customer report with no matching records is left out entirely
+    rather than written as an empty sheet.
+    """
+    if orders is None or orders.empty:
+        return []
+    now = now or now_edmonton()
+
+    sections: list[SiteSection] = []
+    for site in rules.ordered_sites(orders["site"]):
+        sub = _unique_orders(orders[orders["site"] == site])
+        if sub.empty:
+            continue
+        # "SAPUI5 Export" is dropped here — the site's copy of it is the
+        # "<Site> Orders" sheet, and the full export gets its own sheet.
+        reports = {
+            name: df
+            for name, df in build_detail_reports(sub, rules, as_of).items()
+            if name != "SAPUI5 Export" and df is not None and not df.empty
+        }
+        sections.append(SiteSection(
+            site=site,
+            issue_tracker=build_issue_tracker(sub, rules, as_of, now=now),
+            not_started=build_not_started(sub),
+            orders=_canonical_slice(sub).reset_index(drop=True),
+            reports=reports,
+        ))
+    return sections
+
+
+# ---------------------------------------------------------------------------
+# All Plants Summary
+# ---------------------------------------------------------------------------
+def _summary_row(label: str, orders: pd.DataFrame, tracker: pd.DataFrame) -> dict:
+    df = _unique_orders(orders)
+    escalating = df[df["risk_status"].isin(R.ESCALATION_STATUSES)]
+    not_started = df[df["is_not_started"]]
+    return {
+        "Site": label,
+        "Total Orders": int(df["LE Delivery"].nunique()),
+        "Open Orders": int(df.loc[df["is_open"], "LE Delivery"].nunique()),
+        "Critical": int(df.loc[df["risk_status"] == R.CRITICAL, "LE Delivery"].nunique()),
+        "At Risk": int(df.loc[df["risk_status"] == R.AT_RISK, "LE Delivery"].nunique()),
+        "Not Started": int(not_started["LE Delivery"].nunique()),
+        "Late": int(df.loc[df["is_late"], "LE Delivery"].nunique()),
+        "Route Departure Missed": int(
+            df.loc[df["is_route_departure_missed"], "LE Delivery"].nunique()),
+        "Issues": int(len(tracker)),
+        "Total Order Value": float(df["Sales Order Total"].sum()),
+        "Value at Risk": float(escalating["Sales Order Total"].sum()),
+        "Not Started Value": float(not_started["Sales Order Total"].sum()),
+    }
+
+
+def build_all_plants_summary(
+    orders: pd.DataFrame,
+    rules: Ruleset,
+    tracker: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """One row per warehouse plus an ``All Plants`` roll-up row.
+
+    ``tracker`` is the All Plants Issue Tracker; its rows are attributed to a
+    warehouse by their Site column, so the "Issues" count on a warehouse row
+    always equals the number of rows on that warehouse's tracker sheet.
+    """
+    if orders is None or orders.empty:
+        return pd.DataFrame(columns=SUMMARY_COLUMNS)
+    if tracker is None:
+        tracker = pd.DataFrame(columns=ISSUE_TRACKER_COLUMNS)
+
+    rows = []
+    for site in rules.ordered_sites(orders["site"]):
+        sub = orders[orders["site"] == site]
+        if sub.empty:
+            continue
+        site_issues = (tracker[tracker["Site"] == site] if "Site" in tracker.columns
+                       else tracker.iloc[0:0])
+        rows.append(_summary_row(site, sub, site_issues))
+    rows.append(_summary_row(ALL_PLANTS, orders, tracker))
+    return pd.DataFrame(rows)[SUMMARY_COLUMNS]

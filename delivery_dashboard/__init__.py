@@ -10,6 +10,7 @@ Pipeline:
     customer_rules.Ruleset.classify() -> customer_group / customer_report
     risk_engine.enrich(df, as_of)     -> derived fields, risk_status, priority
     report_builder.build_reports(...) -> issue tracker + all detail reports
+    report_builder.build_site_sections() -> the per-warehouse sheets
     excel_exporter.build_workbook(...)-> formatted .xlsx bytes
 
 The single high-level entry point is :func:`process_export`.
@@ -35,13 +36,20 @@ class ProcessResult:
     """Everything the page and the Excel exporter need for one upload."""
 
     orders: pd.DataFrame                       # cleaned + enriched, one row per LE Delivery
-    issue_tracker: pd.DataFrame                # one summarized row per escalating customer
-    not_started: pd.DataFrame
-    reports: dict[str, pd.DataFrame]           # detail report name -> dataframe
+    issue_tracker: pd.DataFrame                # All Plants: Site x Customer x Issue Type
+    not_started: pd.DataFrame                  # All Plants
+    reports: dict[str, pd.DataFrame]           # detail report name -> dataframe (all plants)
     validation_errors: pd.DataFrame            # rows/columns that could not be processed
     as_of: date
+    site_sections: list = field(default_factory=list)          # list[SiteSection]
+    all_plants_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
     warnings: list[str] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def sites(self) -> list[str]:
+        """Warehouses detected in this export, in workbook order."""
+        return [s.site for s in self.site_sections]
 
 
 def process_export(
@@ -69,15 +77,21 @@ def process_export(
     classified = rules.classify(cleaned)
     orders = risk_engine.enrich(classified, as_of, rules)
 
-    issue_tracker = report_builder.build_issue_tracker(orders, rules, as_of)
+    # One timestamp for every "Latest Update" string in this run, so a warehouse
+    # tracker and the combined tracker can never be stamped a minute apart.
+    now = report_builder.now_edmonton()
+
+    issue_tracker = report_builder.build_issue_tracker(orders, rules, as_of, now=now)
     not_started = report_builder.build_not_started(orders)
     reports = report_builder.build_detail_reports(orders, rules, as_of)
+    site_sections = report_builder.build_site_sections(orders, rules, as_of, now=now)
+    all_plants_summary = report_builder.build_all_plants_summary(orders, rules, issue_tracker)
 
     warnings: list[str] = []
     if not validation_errors.empty:
         warnings.append(
             f"{len(validation_errors)} record(s) could not be fully parsed — "
-            "see the Validation Errors download."
+            "see the Validation Warnings sheet in the download."
         )
 
     return ProcessResult(
@@ -87,9 +101,12 @@ def process_export(
         reports=reports,
         validation_errors=validation_errors,
         as_of=as_of,
+        site_sections=site_sections,
+        all_plants_summary=all_plants_summary,
         warnings=warnings,
         meta={
             "row_count": int(len(orders)),
             "duplicate_deliveries_removed": int(cleaned.attrs.get("duplicates_removed", 0)),
+            "sites": [s.site for s in site_sections],
         },
     )

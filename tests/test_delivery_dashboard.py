@@ -21,13 +21,26 @@ from openpyxl import Workbook, load_workbook
 
 from delivery_dashboard import cleaner, loader, process_export, risk_engine
 from delivery_dashboard.customer_rules import load_ruleset
-from delivery_dashboard.excel_exporter import SHEET_ORDER, build_workbook
+from delivery_dashboard.excel_exporter import (
+    SHEET_ORDER,
+    VALIDATION_SHEET,
+    build_workbook,
+    sheet_plan,
+)
 from delivery_dashboard.loader import CANONICAL_COLUMNS, DeliveryLoadError
 from delivery_dashboard.report_builder import (
+    ALL_PLANTS,
     build_andrew_tab,
     build_andrew_tab_2,
     build_issue_tracker,
     build_not_started,
+)
+from delivery_dashboard.sheet_names import (
+    MAX_SHEET_NAME,
+    SheetNamer,
+    sanitize_sheet_name,
+    shorten,
+    site_label_map,
 )
 
 PROTOTYPE = Path(r"C:/Users/melgh/Downloads/Calgary_July_17 (Prototype).xlsx")
@@ -75,6 +88,22 @@ def _rows(*overrides: dict) -> io.BytesIO:
 
 def _process(buf, as_of=AS_OF):
     return process_export(buf, as_of)
+
+
+def _multi_site() -> io.BytesIO:
+    """Two warehouses, each with its own Amazon problem plus a second customer."""
+    return _rows(
+        {"ys": "Calgary Warehouse", "Ship-to Name": "AMAZON CANADA",
+         "Carrier Description": "AMAZON PICKUP",
+         "Planned Dlv. Date": "2026-07-10 23:00:00", "Sales Order Total": "5000"},
+        {"ys": "Calgary Warehouse", "Ship-to Name": "GFS CALGARY",
+         "Planned Dlv. Date": "2026-07-10 23:00:00", "Sales Order Total": "2000"},
+        {"ys": "Mississauga Warehouse", "Ship-to Name": "AMAZON ONTARIO",
+         "Carrier Description": "AMAZON PICKUP",
+         "Planned Dlv. Date": "2026-07-11 23:00:00", "Sales Order Total": "7500"},
+        {"ys": "Mississauga Warehouse", "Ship-to Name": "SYSCO TORONTO",
+         "Planned Dlv. Date": "2026-07-11 23:00:00", "Sales Order Total": "3000"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +394,203 @@ def test_new_upload_replaces_old_data():
     assert "Sysco" not in second.issue_tracker["Customer"].values
     assert "Pratts" in second.issue_tracker["Customer"].values
     assert len(second.orders) == 1
+
+
+# ---------------------------------------------------------------------------
+# Safe sheet names
+# ---------------------------------------------------------------------------
+def test_sanitize_removes_invalid_characters():
+    assert sanitize_sheet_name("Save/On:Foods*?[x]") == "Save On Foods x"
+    assert sanitize_sheet_name("'Calgary'") == "Calgary"
+    assert sanitize_sheet_name("///") == "Sheet"        # never empty
+    assert sanitize_sheet_name(None) == "Sheet"
+
+
+def test_shorten_prefers_a_word_boundary():
+    assert shorten("Calgary North Distribution", 15) == "Calgary North"
+    # A single word longer than the limit still has to be cut somewhere.
+    assert shorten("Supercalifragilistic", 8) == "Supercal"
+
+
+def test_sheet_namer_caps_length_and_deduplicates():
+    namer = SheetNamer()
+    assert namer.allocate("Calgary - AMZ") == "Calgary - AMZ"
+
+    long_name = "Mississauga Distribution Centre - Calgary CO-OP Warehouse"
+    first, second, third = (namer.allocate(long_name) for _ in range(3))
+    assert first != second != third
+    assert second.endswith("(2)") and third.endswith("(3)")
+    for name in (first, second, third):
+        assert len(name) <= MAX_SHEET_NAME
+
+
+def test_sheet_namer_avoids_the_name_excel_reserves():
+    assert SheetNamer().allocate("History") != "History"
+
+
+def test_site_label_map_is_stable_and_leaves_room_for_a_suffix():
+    assert site_label_map(["Calgary", "Mississauga"]) == {
+        "Calgary": "Calgary", "Mississauga": "Mississauga"}
+    long_site = "Calgary North Regional Distribution Centre"
+    assert site_label_map([long_site])[long_site] == "Calgary North"
+
+
+# ---------------------------------------------------------------------------
+# Warehouse sections
+# ---------------------------------------------------------------------------
+def test_sites_are_detected_dynamically_and_ordered_by_config():
+    buf = _rows(
+        {"ys": "Surrey Warehouse"},
+        {"ys": "Calgary Warehouse"},
+        {"ys": "Mississauga Warehouse"},
+        {"ys": "Winnipeg Warehouse"},      # not in site_order -> alphabetical, last
+    )
+    # Configured warehouses keep config order; an unconfigured one still gets a
+    # section rather than being dropped.
+    assert _process(buf).sites == ["Mississauga", "Calgary", "Surrey", "Winnipeg"]
+
+
+def test_all_plants_tracker_keeps_the_same_customer_separate_per_warehouse():
+    result = _process(_multi_site())
+    assert "Site" in result.issue_tracker.columns
+    amazon = result.issue_tracker[result.issue_tracker["Customer"] == "Amazon"]
+    assert sorted(amazon["Site"]) == ["Calgary", "Mississauga"]
+
+
+def test_all_plants_tracker_splits_one_customer_by_issue_type():
+    buf = _rows(
+        {"ys": "Calgary Warehouse", "Ship-to Name": "AMAZON CANADA",
+         "Carrier Description": "AMAZON PICKUP",
+         "Planned Dlv. Date": "2026-07-10 23:00:00", "Sales Order Total": "5000"},
+        {"ys": "Calgary Warehouse", "Ship-to Name": "AMAZON CANADA",
+         "Carrier Description": "AMAZON PICKUP",
+         "Customer Dock Appointment Date": "2026-07-19 00:00:00",
+         "Planned Dlv. Date": "2026-08-20 23:00:00", "Route Depart. Date": "2026-08-19 23:00:00",
+         "Picking in %": "80", "Sales Order Total": "3000"},
+    )
+    amazon = _process(buf).issue_tracker
+    amazon = amazon[amazon["Customer"] == "Amazon"]
+    assert len(amazon) == 2
+    assert set(amazon["Issue Type"]) == {risk_engine.IT_LATE, risk_engine.IT_DEADLINE_SOON}
+
+
+def test_warehouse_tracker_is_exactly_the_all_plants_slice():
+    result = _process(_multi_site())
+    keys = ["Site", "Customer", "Issue Type", "Status", "Order Count", "Total Price"]
+    for section in result.site_sections:
+        expected = result.issue_tracker[result.issue_tracker["Site"] == section.site]
+        pd.testing.assert_frame_equal(
+            section.issue_tracker[keys].reset_index(drop=True),
+            expected[keys].reset_index(drop=True),
+        )
+
+
+def test_warehouse_not_started_uses_picking_zero_and_normalized_goods_issue():
+    buf = _rows(
+        {"ys": "Calgary Warehouse", "Picking in %": "0", "Goods Issue": "Not Started"},   # in
+        {"ys": "Calgary Warehouse", "Picking in %": "0", "Goods Issue": "COMPLETED"},     # out
+        {"ys": "Calgary Warehouse", "Picking in %": "25", "Goods Issue": "Not Started"},  # out
+        {"ys": "Surrey Warehouse", "Picking in %": "0", "Goods Issue": "Not Started"},    # other site
+    )
+    sections = {s.site: s for s in _process(buf).site_sections}
+    assert len(sections["Calgary"].not_started) == 1
+    assert set(sections["Calgary"].not_started["Site"]) == {"Calgary"}
+    assert len(sections["Surrey"].not_started) == 1
+
+
+def test_warehouse_orders_hold_every_unique_delivery_exactly_once():
+    result = _process(_multi_site())
+    assert sum(len(s.orders) for s in result.site_sections) == len(result.orders)
+    ids = pd.concat([s.orders["LE Delivery"] for s in result.site_sections])
+    assert ids.is_unique
+
+
+def test_duplicate_delivery_is_not_double_counted_in_warehouse_figures():
+    buf = _rows(
+        {"ys": "Calgary Warehouse", "LE Delivery": "DUP1", "Sales Order Total": "1000",
+         "Planned Dlv. Date": "2026-07-10 23:00:00", "Picking in %": "0"},
+        {"ys": "Calgary Warehouse", "LE Delivery": "DUP1", "Sales Order Total": "1000",
+         "Planned Dlv. Date": "2026-07-10 23:00:00", "Picking in %": "50"},
+    )
+    result = _process(buf)
+    calgary = result.all_plants_summary[result.all_plants_summary["Site"] == "Calgary"].iloc[0]
+    assert calgary["Total Orders"] == 1
+    assert calgary["Total Order Value"] == 1000.0
+    assert result.issue_tracker["Order Count"].sum() == 1
+
+
+def test_customer_reports_are_only_created_where_records_exist():
+    sections = {s.site: s for s in _process(_multi_site()).site_sections}
+    assert all(not df.empty for s in sections.values() for df in s.reports.values())
+    # Only Mississauga has a Sysco order in this export.
+    assert "Sysco" in sections["Mississauga"].reports
+    assert "Sysco" not in sections["Calgary"].reports
+    assert "GFS" in sections["Calgary"].reports
+    assert "GFS" not in sections["Mississauga"].reports
+
+
+def test_all_plants_summary_rolls_up_every_warehouse():
+    result = _process(_multi_site())
+    summary = result.all_plants_summary
+    assert list(summary["Site"]) == result.sites + [ALL_PLANTS]
+
+    total = summary[summary["Site"] == ALL_PLANTS].iloc[0]
+    per_site = summary[summary["Site"] != ALL_PLANTS]
+    assert total["Total Orders"] == per_site["Total Orders"].sum() == len(result.orders)
+    assert total["Total Order Value"] == per_site["Total Order Value"].sum()
+    assert total["Issues"] == len(result.issue_tracker)
+
+
+# ---------------------------------------------------------------------------
+# Warehouse-organized workbook
+# ---------------------------------------------------------------------------
+def test_workbook_sheet_order_follows_the_warehouse_sections():
+    result = _process(_multi_site())
+    names = [name for name, _df, _options in sheet_plan(result)]
+
+    assert names[:3] == [
+        "All Plants Summary", "All Plants Issue Tracker", "All Plants Not Started"]
+    assert names[-1] == "SAPUI5 Export"
+
+    assert result.sites == ["Mississauga", "Calgary"]
+    for site in result.sites:
+        start = names.index(f"{site} Issue Tracker")
+        assert names[start:start + 3] == [
+            f"{site} Issue Tracker", f"{site} Not Started", f"{site} Orders"]
+    assert names.index("Mississauga Orders") < names.index("Calgary Issue Tracker")
+
+    # Everything between the combined sheets and the export belongs to a site.
+    assert all(n.startswith(("Mississauga", "Calgary")) for n in names[3:-1])
+    # ...and the customer reports are named "<Warehouse> - <Report>".
+    assert "Calgary - AMZ" in names and "Mississauga - Sysco" in names
+
+
+def test_workbook_sheet_names_are_legal_and_unique():
+    wb = load_workbook(io.BytesIO(build_workbook(_process(_multi_site()))))
+    assert all(len(n) <= MAX_SHEET_NAME for n in wb.sheetnames)
+    assert len({n.casefold() for n in wb.sheetnames}) == len(wb.sheetnames)
+
+
+def test_long_warehouse_label_is_shortened_the_same_way_on_every_sheet():
+    rules = load_ruleset()
+    rules.site_display["CALGARY WAREHOUSE"] = "Calgary North Regional Distribution Centre"
+    result = process_export(_multi_site(), AS_OF, ruleset=rules)
+
+    wb = load_workbook(io.BytesIO(build_workbook(result)))
+    assert all(len(n) <= MAX_SHEET_NAME for n in wb.sheetnames)
+    assert len({n.casefold() for n in wb.sheetnames}) == len(wb.sheetnames)
+    # One shortened label, reused across the whole block.
+    block = [n for n in wb.sheetnames if n.startswith("Calgary North ")]
+    assert {"Calgary North Issue Tracker", "Calgary North Not Started",
+            "Calgary North Orders"} <= set(block)
+
+
+def test_validation_warnings_sheet_is_written_last():
+    result = _process(_rows({"ys": "Calgary Warehouse", "Sales Order Total": "TBD"}))
+    assert not result.validation_errors.empty
+    assert [n for n, _df, _o in sheet_plan(result)][-1] == VALIDATION_SHEET
+    wb = load_workbook(io.BytesIO(build_workbook(result)))
+    assert wb.sheetnames[-1] == VALIDATION_SHEET
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,14 @@ from delivery_dashboard import risk_engine as R
 from delivery_dashboard.customer_rules import load_ruleset
 from delivery_dashboard.excel_exporter import build_workbook
 from delivery_dashboard.loader import DeliveryLoadError
-from delivery_dashboard.report_builder import ISSUE_TRACKER_COLUMNS, build_issue_tracker
+from delivery_dashboard.report_builder import (
+    ALL_PLANTS,
+    build_all_plants_summary,
+    build_detail_reports,
+    build_issue_tracker,
+    build_not_started,
+    build_site_sections,
+)
 
 try:
     import plotly.express as px
@@ -178,6 +185,20 @@ with tab_exec:
 
     st.markdown("---")
 
+    st.markdown("**All Plants Summary**")
+    st.caption("One row per warehouse plus the roll-up — the first sheet in the download.")
+    st.dataframe(
+        build_all_plants_summary(fdf, rules, tracker_view),
+        use_container_width=True, hide_index=True,
+        column_config={
+            "Total Order Value": st.column_config.NumberColumn(format="$%.2f"),
+            "Value at Risk": st.column_config.NumberColumn(format="$%.2f"),
+            "Not Started Value": st.column_config.NumberColumn(format="$%.2f"),
+        },
+    )
+
+    st.markdown("---")
+
     if escalating.empty:
         st.success("No escalating orders for the current filters. 🎉")
     else:
@@ -237,7 +258,8 @@ with tab_exec:
 # ── Issue Tracker ────────────────────────────────────────────────────────────
 with tab_issue:
     st.subheader("Issue Tracker")
-    st.caption("One row per escalating customer group. Total Price counts only the "
+    st.caption("One row per warehouse × customer × issue type, so an Amazon problem in "
+               "Calgary never merges with one in Mississauga. Total Price counts only the "
                "affected (at-risk) orders. Select a row to see its underlying orders.")
     if tracker_view.empty:
         st.success("No customer groups are currently escalating for these filters.")
@@ -256,14 +278,23 @@ with tab_issue:
         )
         sel = event.get("selection", {}).get("rows", []) if hasattr(event, "get") else []
         if sel:
-            grp_display = tracker_view.iloc[sel[0]]["Customer"]
-            related = escalating[escalating["customer_display"] == grp_display]
-            st.markdown(f"**Orders behind — {grp_display}** ({len(related)} escalating)")
+            picked = tracker_view.iloc[sel[0]]
+            # Match all three grouping keys, or the drill-down would show orders
+            # from other warehouses and other issue types.
+            related = escalating[
+                (escalating["site"] == picked["Site"])
+                & (escalating["customer_display"] == picked["Customer"])
+                & (escalating["issue_type"] == picked["Issue Type"])
+            ]
+            st.markdown(
+                f"**Orders behind — {picked['Site']} · {picked['Customer']} · "
+                f"{picked['Issue Type']}** ({len(related)} escalating)"
+            )
             st.dataframe(
                 related[[
                     "site", "LE Delivery", "Ship-to Name", "Facility Code", "Picking in %",
-                    "risk_status", "priority", "Planned Dlv. Date", "Route Depart. Date",
-                    "Sales Order Total",
+                    "risk_status", "issue_type", "priority", "Planned Dlv. Date",
+                    "Route Depart. Date", "Sales Order Total",
                 ]],
                 use_container_width=True, hide_index=True,
                 column_config={
@@ -278,7 +309,6 @@ with tab_ns:
     st.caption("Orders at 0% picking with Goods Issue not completed. Once picking "
                "starts, an order drops off this list on the next upload.")
     # Recompute the Not Started report against the filtered frame for the view.
-    from delivery_dashboard.report_builder import build_not_started
     ns_table = build_not_started(fdf)
 
     overdue = int(((not_started_view["days_to_planned_delivery"] < 0)).sum())
@@ -305,22 +335,37 @@ with tab_ns:
 with tab_cust:
     st.subheader("Customer Reports")
     st.caption("Each report is regenerated from today's export. Totals reflect the "
-               "full report (not the sidebar filters).")
-    report_names = [n for n in result.reports if n != "SAPUI5 Export"]
-    choice = st.selectbox("Report", report_names, key="ddr_report_pick")
-    rdf = result.reports[choice]
-    if "Sales Order Total" in rdf.columns:
-        tot = float(pd.to_numeric(rdf["Sales Order Total"], errors="coerce").fillna(0).sum())
-        st.metric(f"{choice} — Rows / Total", f"{len(rdf):,}  •  {_money(tot)}")
-    else:
-        st.metric(f"{choice} — Rows", f"{len(rdf):,}")
-    st.dataframe(
-        rdf, use_container_width=True, hide_index=True,
-        column_config={
-            "Sales Order Total": st.column_config.NumberColumn(format="$%.2f"),
-            "Picking in %": st.column_config.NumberColumn(format="%d%%"),
-        },
+               "full report (not the sidebar filters). Picking a warehouse shows exactly "
+               "what its sheet in the download contains.")
+
+    scope = st.selectbox(
+        "Warehouse", [ALL_PLANTS] + result.sites, key="ddr_report_site",
+        help="All Plants covers every warehouse; a warehouse lists only the reports "
+             "that actually have records for it.",
     )
+    if scope == ALL_PLANTS:
+        available = {n: df for n, df in result.reports.items() if n != "SAPUI5 Export"}
+    else:
+        available = next(s.reports for s in result.site_sections if s.site == scope)
+
+    if not available:
+        st.info(f"No customer reports have records for {scope}.")
+    else:
+        choice = st.selectbox("Report", list(available), key=f"ddr_report_pick_{scope}")
+        rdf = available[choice]
+        label = choice if scope == ALL_PLANTS else f"{scope} - {choice}"
+        if "Sales Order Total" in rdf.columns:
+            tot = float(pd.to_numeric(rdf["Sales Order Total"], errors="coerce").fillna(0).sum())
+            st.metric(f"{label} — Rows / Total", f"{len(rdf):,}  •  {_money(tot)}")
+        else:
+            st.metric(f"{label} — Rows", f"{len(rdf):,}")
+        st.dataframe(
+            rdf, use_container_width=True, hide_index=True,
+            column_config={
+                "Sales Order Total": st.column_config.NumberColumn(format="$%.2f"),
+                "Picking in %": st.column_config.NumberColumn(format="%d%%"),
+            },
+        )
 
 # ── Raw SAP Data ─────────────────────────────────────────────────────────────
 with tab_raw:
@@ -329,17 +374,21 @@ with tab_raw:
                "Original business column names are preserved.")
     st.dataframe(result.reports["SAPUI5 Export"], use_container_width=True, hide_index=True)
     if not result.validation_errors.empty:
-        st.markdown(f"**Validation notes** — {len(result.validation_errors)} record(s) flagged")
+        st.markdown(f"**Validation warnings** — {len(result.validation_errors)} record(s) flagged")
         st.dataframe(result.validation_errors, use_container_width=True, hide_index=True)
 
 # ── Download ─────────────────────────────────────────────────────────────────
 with tab_dl:
     st.subheader("Download Excel Report")
     st.markdown(
-        "One formatted workbook: **Issue Tracker → Not Started Orders → SAPUI5 Export → "
-        "DSD Priorities → AMZ → Andrew Tab → Andrew Tab 2 → PFG WHSE → Calgary CO-OP → "
-        "Sysco → GFS → Pratts** (plus a Validation Errors sheet when needed)."
+        "One formatted workbook, organized by warehouse: **All Plants Summary → "
+        "All Plants Issue Tracker → All Plants Not Started**, then for each warehouse "
+        "its **Issue Tracker → Not Started → Orders → customer reports**, then the full "
+        "**SAPUI5 Export** (plus a Validation Warnings sheet when needed). Customer "
+        "reports with no records for a warehouse are skipped rather than written empty."
     )
+    if result.sites:
+        st.caption("Warehouses in this export: " + " · ".join(result.sites))
     export_filtered = st.checkbox(
         "Export Filtered View instead of the complete dataset", value=False,
         help="Default export contains the complete processed dataset.",
@@ -348,14 +397,16 @@ with tab_dl:
     if st.button("Generate Excel Workbook", type="primary"):
         with st.spinner("Building workbook..."):
             if export_filtered and _filtered:
-                from delivery_dashboard.report_builder import build_detail_reports
+                f_tracker = build_issue_tracker(fdf, rules, as_of)
                 fr = ProcessResult(
                     orders=fdf,
-                    issue_tracker=build_issue_tracker(fdf, rules, as_of),
+                    issue_tracker=f_tracker,
                     not_started=build_not_started(fdf),
                     reports=build_detail_reports(fdf, rules, as_of),
                     validation_errors=result.validation_errors,
                     as_of=as_of,
+                    site_sections=build_site_sections(fdf, rules, as_of),
+                    all_plants_summary=build_all_plants_summary(fdf, rules, f_tracker),
                 )
                 xlsx = build_workbook(fr)
                 fname = f"Daily_Delivery_Risk_{as_of.isoformat()}_filtered.xlsx"

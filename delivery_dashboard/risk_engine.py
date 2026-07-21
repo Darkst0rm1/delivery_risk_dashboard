@@ -25,6 +25,39 @@ RESOLVED = "Resolved"
 # Statuses that put a customer on the escalation-only Issue Tracker.
 ESCALATION_STATUSES = {CRITICAL, AT_RISK}
 
+# Issue Type vocabulary — *why* an order is on the tracker, as opposed to how
+# bad it is. The Issue Tracker groups on it, so one Amazon row can be "Late
+# Delivery" while another stays "Cancellation Deadline Approaching" instead of
+# collapsing into a single vague row.
+IT_DEADLINE_PASSED = "Cancellation Deadline Passed"
+IT_LATE = "Late Delivery"
+IT_ROUTE_MISSED = "Route Departure Missed"
+IT_DEADLINE_SOON = "Cancellation Deadline Approaching"
+IT_NOT_STARTED = "Not Started"
+IT_PICKING_BEHIND = "Picking Behind Schedule"
+IT_AWAITING_GI = "Awaiting Goods Issue"
+IT_RESOLVED = "Resolved"
+IT_OTHER = "Other"
+
+# Assignment precedence (an order can trip several conditions at once) and the
+# order issue types are ranked in on the tracker.
+_ISSUE_TYPE_ORDER = {
+    IT_DEADLINE_PASSED: 0,
+    IT_LATE: 1,
+    IT_ROUTE_MISSED: 2,
+    IT_DEADLINE_SOON: 3,
+    IT_NOT_STARTED: 4,
+    IT_PICKING_BEHIND: 5,
+    IT_AWAITING_GI: 6,
+    IT_RESOLVED: 7,
+    IT_OTHER: 8,
+}
+
+
+def issue_type_rank(value: str) -> int:
+    """Sort key for an issue type; unknown values sort last."""
+    return _ISSUE_TYPE_ORDER.get(value, 9)
+
 # Priority vocabulary (Not Started report + row ranking).
 PRIORITY_CRITICAL = "Critical"
 PRIORITY_HIGH = "High"
@@ -126,6 +159,27 @@ def enrich(df: pd.DataFrame, as_of: date, rules: Ruleset) -> pd.DataFrame:
     ]
     choices = [RESOLVED, CRITICAL, AT_RISK, READY, IN_PROGRESS]
     out["risk_status"] = np.select(conditions, choices, default=NOT_STARTED)
+
+    # -- Issue type ----------------------------------------------------------
+    # Same leading condition as risk_status (a completed Goods Issue is done,
+    # whatever else is true of it), then most-to-least severe.
+    out["issue_type"] = np.select(
+        [
+            out["is_goods_issue_complete"],
+            deadline_passed,
+            out["is_late"],
+            out["is_route_departure_missed"],
+            deadline_within_crit | deadline_within_risk,
+            out["is_not_started"],
+            out["is_picking_in_progress"],
+            out["is_picking_complete"],
+        ],
+        [
+            IT_RESOLVED, IT_DEADLINE_PASSED, IT_LATE, IT_ROUTE_MISSED,
+            IT_DEADLINE_SOON, IT_NOT_STARTED, IT_PICKING_BEHIND, IT_AWAITING_GI,
+        ],
+        default=IT_OTHER,
+    )
 
     # -- Priority (Not Started report + ranking) -----------------------------
     earliest_due = pd.concat(

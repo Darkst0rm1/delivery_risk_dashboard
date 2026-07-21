@@ -9,9 +9,21 @@
 # whitespace-collapsed Ship-to Name / Carrier Description values.
 # =============================================================================
 
-# ys value -> short site label shown on the dashboard and Issue Tracker.
+# ys value -> short site label shown on the dashboard and Issue Tracker. Any ys
+# value not listed here falls back to its first word, so a new warehouse still
+# gets its own sheets without a config change.
 site_display:
+  "MISSISSAUGA WAREHOUSE": "Mississauga"
   "CALGARY WAREHOUSE": "Calgary"
+  "SURREY WAREHOUSE": "Surrey"
+
+# Order the per-warehouse sections appear in the download. Sites found in the
+# export but missing here are appended alphabetically; sites listed here but
+# absent from the export produce no sheets at all.
+site_order:
+  - Mississauga
+  - Calgary
+  - Surrey
 
 # Escalation windows (in days, measured against the "As of Date").
 escalation:

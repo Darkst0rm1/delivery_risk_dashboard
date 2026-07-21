@@ -1,9 +1,16 @@
 """Render the processed dashboard into a formatted .xlsx workbook.
 
-Sheet order and formatting follow the spec: dark-blue headers, frozen header
-row, Excel auto-filters, MM/DD/YYYY dates, Canadian-currency totals, whole-
-percent picking, wrapped long text, status/priority highlighting and totals
-rows on the customer detail reports.
+The workbook is organized by warehouse. Three combined sheets come first
+(All Plants Summary / Issue Tracker / Not Started), then one section per
+warehouse detected in the export — its Issue Tracker, Not Started, Orders and
+whichever customer reports actually have records — then the full SAPUI5 Export
+and, when needed, Validation Warnings. Nothing is hardcoded to a fixed set of
+warehouses: the sections come from ``result.site_sections``.
+
+Formatting follows the spec: dark-blue headers, frozen header row, Excel
+auto-filters, MM/DD/YYYY dates, Canadian-currency totals, whole-percent
+picking, wrapped long text, status/priority highlighting and totals rows on the
+customer detail reports.
 """
 from __future__ import annotations
 
@@ -16,6 +23,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from . import risk_engine as R
+from .sheet_names import SheetNamer, site_label_map
 
 # --- styles ------------------------------------------------------------------
 HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
@@ -32,7 +40,10 @@ CURRENCY_FMT = '"$"#,##0.00'
 DATE_FMT = "MM/DD/YYYY"
 PCT_FMT = '0"%"'
 
-_CURRENCY_COLS = {"Total Price", "Sales Order Total"}
+_CURRENCY_COLS = {
+    "Total Price", "Sales Order Total",
+    "Total Order Value", "Value at Risk", "Not Started Value",   # All Plants Summary
+}
 _DATE_COLS = {
     "Warehouse Task Creat", "Route Depart. Date", "Planned Dlv. Date",
     "Customer Dock Appointment Date", "Due Date",
@@ -40,20 +51,31 @@ _DATE_COLS = {
 _PCT_COLS = {"Picking in %", "picking_pct"}
 _WRAP_COLS = {"Issue", "Consequence / Risk", "Latest Update"}
 
-# Sheets that receive a Sales Order Total totals row.
-_TOTALS_SHEETS = {"AMZ", "PFG WHSE", "Calgary CO-OP", "Sysco", "GFS", "Pratts"}
-# Customer detail sheets that get late/not-started row highlighting.
-_HIGHLIGHT_DETAIL_SHEETS = _TOTALS_SHEETS
+# Whole-number columns; listed so a blank cell writes 0 rather than an empty
+# string that Excel would refuse to sum.
+_COUNT_COLS = {
+    "Cases", "Line Items", "Pallet Quantity", "Num. Lifts Pallets", "Gross Weight",
+    "Order Count", "Days to Route Departure", "Days to Planned Delivery",
+    "Total Orders", "Open Orders", "Critical", "At Risk", "Not Started", "Late",
+    "Route Departure Missed", "Issues",
+}
 
 AMZ_NOTE = ("HIGHLIGHTED ORDERS ARE CURRENTLY LATE AND MAY BE SUBJECT TO THE "
             "CONFIGURED ON-TIME DELIVERY CHARGEBACK")
 
-# Canonical download sheet order.
+# The combined sheets, which are present in every download regardless of which
+# warehouses the export contains. The per-warehouse sections are generated
+# between "All Plants Not Started" and "SAPUI5 Export".
 SHEET_ORDER = [
-    "Issue Tracker", "Not Started Orders", "SAPUI5 Export", "DSD Priorities",
-    "AMZ", "Andrew Tab", "Andrew Tab 2", "PFG WHSE", "Calgary CO-OP",
-    "Sysco", "GFS", "Pratts",
+    "All Plants Summary", "All Plants Issue Tracker", "All Plants Not Started",
+    "SAPUI5 Export",
 ]
+
+# Written last, and only when the upload produced something to report.
+VALIDATION_SHEET = "Validation Warnings"
+
+# Suffixes appended to a warehouse label, in section order.
+SITE_SHEET_SUFFIXES = ("Issue Tracker", "Not Started", "Orders")
 
 
 def _sanitize(value, is_numeric_col: bool):
@@ -98,17 +120,18 @@ def _write_sheet(
     status_col: str | None = None,
     priority_col: str | None = None,
     highlight_detail: bool = False,
+    bold_last_row: bool = False,
 ) -> None:
-    ws = wb.create_sheet(title=name[:31])
+    # `name` is expected to already be legal and unique (see SheetNamer) —
+    # openpyxl would silently rename a clash, which would hide the bug.
+    ws = wb.create_sheet(title=name)
     if df is None or df.empty:
         ws.append([f"No data for: {name}"])
         return
 
     columns = list(df.columns)
-    numeric_cols = {c for c in columns if c in _CURRENCY_COLS or c in _PCT_COLS
-                    or c in {"Cases", "Line Items", "Pallet Quantity", "Num. Lifts Pallets",
-                             "Gross Weight", "Order Count", "Days to Route Departure",
-                             "Days to Planned Delivery"}}
+    numeric_cols = {c for c in columns
+                    if c in _CURRENCY_COLS or c in _PCT_COLS or c in _COUNT_COLS}
 
     ws.append(columns)
     records = df.to_dict("records")
@@ -162,6 +185,11 @@ def _write_sheet(
             for c_i in range(1, len(columns) + 1):
                 ws.cell(row=r_i, column=c_i).fill = fill
 
+    # Roll-up row of the All Plants Summary.
+    if bold_last_row:
+        for c_i in range(1, len(columns) + 1):
+            ws.cell(row=len(records) + 1, column=c_i).font = TOTAL_FONT
+
     # Totals row for customer reports.
     if add_totals and "Sales Order Total" in columns:
         total = float(pd.to_numeric(df["Sales Order Total"], errors="coerce").fillna(0).sum())
@@ -179,36 +207,56 @@ def _write_sheet(
         c.font = NOTE_FONT
 
 
+def sheet_plan(result) -> list[tuple[str, object, dict]]:
+    """``(requested name, dataframe, formatting kwargs)`` for every sheet, in order.
+
+    Names here are the *intended* ones; :class:`SheetNamer` in
+    :func:`build_workbook` is what turns them into legal, unique worksheet
+    titles. Split out from the writing so the plan can be asserted in tests
+    without building a workbook.
+    """
+    plan: list[tuple[str, object, dict]] = [
+        ("All Plants Summary", result.all_plants_summary, {"bold_last_row": True}),
+        ("All Plants Issue Tracker", result.issue_tracker, {"status_col": "Status"}),
+        ("All Plants Not Started", result.not_started, {"priority_col": "Priority"}),
+    ]
+
+    sections = list(getattr(result, "site_sections", []) or [])
+    labels = site_label_map(s.site for s in sections)
+    for section in sections:
+        label = labels[section.site]
+        plan.append((f"{label} Issue Tracker", section.issue_tracker, {"status_col": "Status"}))
+        plan.append((f"{label} Not Started", section.not_started, {"priority_col": "Priority"}))
+        plan.append((f"{label} Orders", section.orders,
+                     {"add_totals": True, "highlight_detail": True}))
+        # Customer reports for this warehouse; build_site_sections has already
+        # dropped the ones with no matching records, so none of these are empty.
+        for name, df in section.reports.items():
+            attrs = getattr(df, "attrs", None) or {}
+            is_customer_report = bool(attrs.get("is_customer_report"))
+            plan.append((f"{label} - {name}", df, {
+                "add_totals": is_customer_report,
+                "highlight_detail": is_customer_report,
+                "note": AMZ_NOTE if attrs.get("amazon_note") else None,
+            }))
+
+    plan.append(("SAPUI5 Export", (result.reports or {}).get("SAPUI5 Export"), {}))
+
+    errors = result.validation_errors
+    if errors is not None and not errors.empty:
+        plan.append((VALIDATION_SHEET, errors, {}))
+    return plan
+
+
 def build_workbook(result) -> bytes:
     """Build the full workbook from a ``ProcessResult``. Returns .xlsx bytes."""
     as_of_ts = pd.Timestamp(result.as_of)
     wb = Workbook()
     wb.remove(wb.active)  # drop the default empty sheet
 
-    _write_sheet(wb, "Issue Tracker", result.issue_tracker, as_of_ts=as_of_ts,
-                 status_col="Status")
-    _write_sheet(wb, "Not Started Orders", result.not_started, as_of_ts=as_of_ts,
-                 priority_col="Priority")
-
-    reports = result.reports
-    for name in ["SAPUI5 Export", "DSD Priorities", "AMZ", "Andrew Tab", "Andrew Tab 2",
-                 "PFG WHSE", "Calgary CO-OP", "Sysco", "GFS", "Pratts"]:
-        if name in reports:
-            _write_sheet(
-                wb, name, reports[name], as_of_ts=as_of_ts,
-                add_totals=name in _TOTALS_SHEETS,
-                note=AMZ_NOTE if name == "AMZ" else None,
-                highlight_detail=name in _HIGHLIGHT_DETAIL_SHEETS,
-            )
-
-    # Any extra customer reports not in the canonical order (future-proofing).
-    for name, df in reports.items():
-        if name not in SHEET_ORDER and name not in wb.sheetnames:
-            _write_sheet(wb, name, df, as_of_ts=as_of_ts)
-
-    # Validation errors last, only if there are any.
-    if result.validation_errors is not None and not result.validation_errors.empty:
-        _write_sheet(wb, "Validation Errors", result.validation_errors, as_of_ts=as_of_ts)
+    namer = SheetNamer()
+    for name, df, options in sheet_plan(result):
+        _write_sheet(wb, namer.allocate(name), df, as_of_ts=as_of_ts, **options)
 
     buf = BytesIO()
     wb.save(buf)

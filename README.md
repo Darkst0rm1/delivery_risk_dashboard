@@ -33,22 +33,59 @@ Then in the browser:
   `is_route_departure_missed`, days-to-deadline fields, `risk_status`
   (Critical / At Risk / In Progress / Ready-Awaiting GI / Not Started /
   Resolved) and `priority`, all relative to the As of Date.
-- **Issue Tracker** — one escalation-only row per customer group, with
-  deterministic issue text, consequence/risk, owner, earliest due date, status,
-  value at risk (affected orders only), order count, and a live "Latest Update".
+- **Issue Tracker** — one escalation-only row per **warehouse × customer group ×
+  issue type**, with deterministic issue text, consequence/risk, owner, earliest
+  due date, status, value at risk (affected orders only), order count, and a
+  live "Latest Update". An Amazon problem in Calgary never merges with an Amazon
+  problem in Mississauga, and a late delivery stays separate from a missed route
+  departure.
 - **Reports** — Not Started Orders, plus AMZ, Andrew Tab, Andrew Tab 2,
   PFG WHSE, Calgary CO-OP, Sysco, GFS, Pratts and DSD Priorities.
-- **Excel export** — professional formatting: frozen headers, filters,
-  MM/DD/YYYY dates, Canadian-currency totals, status highlighting, per-report
-  totals, in the required sheet order.
+- **Excel export** — organized by warehouse (see below), with professional
+  formatting: frozen headers, filters, MM/DD/YYYY dates, Canadian-currency
+  totals, status highlighting and per-report totals.
+
+## Workbook structure
+
+The download opens with three combined sheets, then one section per warehouse
+**detected in the uploaded export**, then the full export:
+
+```
+All Plants Summary            one row per warehouse + an All Plants roll-up
+All Plants Issue Tracker      every warehouse, Site column retained
+All Plants Not Started
+<Warehouse> Issue Tracker     \
+<Warehouse> Not Started        |  repeated for each warehouse, in the order
+<Warehouse> Orders             |  set by site_order in the YAML
+<Warehouse> - AMZ, ...        /   (customer reports, non-empty ones only)
+SAPUI5 Export
+Validation Warnings           only when a record could not be fully parsed
+```
+
+Nothing is hardcoded to a fixed set of warehouses: a new site appearing in
+tomorrow's export gets its own section with no code change (sites absent from
+`site_order` are appended alphabetically). A warehouse's Not Started sheet is
+its deliveries at `Picking in % == 0` whose normalized Goods Issue is not
+`Completed`; its Orders sheet is every unique delivery for that warehouse. Each
+warehouse's Issue Tracker is exactly the All Plants tracker filtered to that
+site, and every count and dollar total is computed over unique `LE Delivery`
+values so duplicate records can never inflate a figure.
+
+Excel caps worksheet names at 31 characters, so
+[`delivery_dashboard/sheet_names.py`](delivery_dashboard/sheet_names.py) strips
+illegal characters, shortens long warehouse/report names on a word boundary
+(once per warehouse, so the whole block reads consistently) and guarantees
+uniqueness.
 
 ## Configuration
 
 All business rules live in [`config/delivery_dashboard_rules.yaml`](config/delivery_dashboard_rules.yaml)
 — customer matching patterns, owners, consequence text, detail-report filters
 (e.g. PFG WHSE = Save On / Associated Grocers restricted to warehouse
-facilities), DSD priority patterns, and escalation windows. Edit the YAML to add
-customers or retune thresholds; the Python engine stays generic.
+facilities), DSD priority patterns, escalation windows, warehouse labels
+(`site_display`) and the order warehouse sections appear in (`site_order`). Edit
+the YAML to add customers, add a warehouse or retune thresholds; the Python
+engine stays generic.
 
 ## Project layout
 
@@ -58,9 +95,10 @@ config/delivery_dashboard_rules.yaml
 delivery_dashboard/                 # reusable, UI-free processing engine
     loader.py        # read + validate the export
     cleaner.py       # clean + de-duplicate
-    customer_rules.py# YAML rules + classification
-    risk_engine.py   # derived fields, status, priority
-    report_builder.py# issue tracker + all reports
+    customer_rules.py# YAML rules + classification + warehouse ordering
+    risk_engine.py   # derived fields, status, issue type, priority
+    report_builder.py# issue tracker, reports, per-warehouse sections, summary
+    sheet_names.py   # safe/unique Excel worksheet names
     excel_exporter.py# formatted workbook
 tests/test_delivery_dashboard.py
 ```
