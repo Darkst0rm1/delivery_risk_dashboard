@@ -214,7 +214,7 @@ def _latest_update(affected: pd.DataFrame, rules: Ruleset, now: datetime) -> str
     hour12 = now.hour % 12 or 12
     stamp = f"{now.strftime('%b %d, %Y')} at {hour12}:{now.minute:02d} {now.strftime('%p')}"
     return (f"As of {stamp}: {late} orders are late, {not_started} are not started and the "
-            f"current value at risk is ${value:,.2f}. The nearest due date is {nearest}.")
+            f"current value at risk is ${value:,.0f}. The nearest due date is {nearest}.")
 
 
 # ---------------------------------------------------------------------------

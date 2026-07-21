@@ -36,7 +36,7 @@ FILL_AT_RISK = PatternFill("solid", fgColor="FFD9A0")     # orange
 FILL_NOT_STARTED = PatternFill("solid", fgColor="FFF2CC")  # yellow
 FILL_READY = PatternFill("solid", fgColor="D9EAD3")       # green-ish
 
-CURRENCY_FMT = '"$"#,##0.00'
+CURRENCY_FMT = '"$"#,##0'
 DATE_FMT = "MM/DD/YYYY"
 PCT_FMT = '0"%"'
 

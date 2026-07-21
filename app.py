@@ -150,7 +150,7 @@ if _filtered:
 # Derived helpers
 # ---------------------------------------------------------------------------
 def _money(x: float) -> str:
-    return f"${x:,.2f}"
+    return f"${x:,.0f}"
 
 
 tracker_view = build_issue_tracker(fdf, rules, as_of, include_non_escalated=show_resolved)
@@ -191,9 +191,9 @@ with tab_exec:
         build_all_plants_summary(fdf, rules, tracker_view),
         use_container_width=True, hide_index=True,
         column_config={
-            "Total Order Value": st.column_config.NumberColumn(format="$%.2f"),
-            "Value at Risk": st.column_config.NumberColumn(format="$%.2f"),
-            "Not Started Value": st.column_config.NumberColumn(format="$%.2f"),
+            "Total Order Value": st.column_config.NumberColumn(format="$%.0f"),
+            "Value at Risk": st.column_config.NumberColumn(format="$%.0f"),
+            "Not Started Value": st.column_config.NumberColumn(format="$%.0f"),
         },
     )
 
@@ -269,7 +269,7 @@ with tab_issue:
         event = st.dataframe(
             display, use_container_width=True, hide_index=True,
             column_config={
-                "Total Price": st.column_config.NumberColumn("Total Price", format="$%.2f"),
+                "Total Price": st.column_config.NumberColumn("Total Price", format="$%.0f"),
                 "Issue": st.column_config.TextColumn("Issue", width="large"),
                 "Consequence / Risk": st.column_config.TextColumn("Consequence / Risk", width="medium"),
                 "Latest Update": st.column_config.TextColumn("Latest Update", width="large"),
@@ -298,7 +298,7 @@ with tab_issue:
                 ]],
                 use_container_width=True, hide_index=True,
                 column_config={
-                    "Sales Order Total": st.column_config.NumberColumn(format="$%.2f"),
+                    "Sales Order Total": st.column_config.NumberColumn(format="$%.0f"),
                     "Picking in %": st.column_config.NumberColumn(format="%d%%"),
                 },
             )
@@ -326,7 +326,7 @@ with tab_ns:
         st.dataframe(
             ns_table, use_container_width=True, hide_index=True,
             column_config={
-                "Sales Order Total": st.column_config.NumberColumn(format="$%.2f"),
+                "Sales Order Total": st.column_config.NumberColumn(format="$%.0f"),
                 "Picking in %": st.column_config.NumberColumn(format="%d%%"),
             },
         )
@@ -362,7 +362,7 @@ with tab_cust:
         st.dataframe(
             rdf, use_container_width=True, hide_index=True,
             column_config={
-                "Sales Order Total": st.column_config.NumberColumn(format="$%.2f"),
+                "Sales Order Total": st.column_config.NumberColumn(format="$%.0f"),
                 "Picking in %": st.column_config.NumberColumn(format="%d%%"),
             },
         )
