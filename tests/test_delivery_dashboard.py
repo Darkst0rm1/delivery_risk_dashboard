@@ -30,6 +30,7 @@ from delivery_dashboard.excel_exporter import (
 from delivery_dashboard.loader import CANONICAL_COLUMNS, DeliveryLoadError
 from delivery_dashboard.report_builder import (
     ALL_PLANTS,
+    ISSUE_TRACKER_COLUMNS,
     build_andrew_tab,
     build_andrew_tab_2,
     build_all_plants_summary,
@@ -224,6 +225,105 @@ def test_customer_classification(ship, carrier, expected):
     clean, _ = cleaner.clean(df)
     classified = rules.classify(clean)
     assert classified["customer_group"].iloc[0] == expected
+
+
+@pytest.mark.parametrize("ship, carrier, expected", [
+    # Walmart
+    ("SOME RECEIVER", "WALMART PICKUP", "walmart"),
+    ("SOME RECEIVER", "WALMART PICK UP", "walmart"),
+    ("WALMART DC 6094", "VERSACOLD", "walmart"),
+    ("WM CALGARY DC", "VERSACOLD", "walmart"),
+    # "WM " is a prefix rule, not a substring: neither of these is Walmart.
+    ("WMX LOGISTICS", "VERSACOLD", "other"),
+    ("BUILDING WM SUPPLY", "VERSACOLD", "other"),
+    # Loblaws
+    ("SOME RECEIVER", "LOBLAWS PICK UP", "loblaws"),
+    ("SOME RECEIVER", "LOBLAW PICK UP", "loblaws"),
+    ("SOME RECEIVER", "LOBLAWS PICKUP", "loblaws"),
+    ("SOME RECEIVER", "LOBLAW PICKUP", "loblaws"),
+    ("LOBLAW COMPANIES LTD", "VERSACOLD", "loblaws"),
+    ("LOBLAWS SUPERMARKET 1234", "VERSACOLD", "loblaws"),
+    # Consignee names only count as Loblaws when the carrier says so.
+    ("WESTERN GROCERS", "LOBLAWS PICK UP", "loblaws"),
+    ("WESTERN GROCERS", "VERSACOLD", "other"),
+    ("ATLANTIC FREEZER DIST CENTRE", "LOBLAW PICKUP", "loblaws"),
+    ("ATLANTIC FREEZER DIST CENTRE", "VERSACOLD", "other"),
+])
+def test_walmart_and_loblaws_classification(ship, carrier, expected):
+    rules = load_ruleset()
+    df = loader.load_sap_export(_rows({"Ship-to Name": ship, "Carrier Description": carrier}))
+    clean, _ = cleaner.clean(df)
+    classified = rules.classify(clean)
+    assert classified["customer_group"].iloc[0] == expected
+
+
+def test_walmart_and_loblaws_display_names():
+    rules = load_ruleset()
+    assert rules.rule("walmart").display == "Walmart"
+    assert rules.rule("loblaws").display == "Loblaws"
+
+
+def test_existing_customers_still_win_over_the_new_rules():
+    # Every rule above Walmart/Loblaws keeps its match — the new groups only
+    # take orders that were falling through to the fallback.
+    rules = load_ruleset()
+    df = loader.load_sap_export(_rows(
+        {"Ship-to Name": "AMAZON YYC4", "Carrier Description": "WALMART PICKUP"},
+        {"Ship-to Name": "SOBEYS 3012", "Carrier Description": "LOBLAWS PICKUP"},
+    ))
+    clean, _ = cleaner.clean(df)
+    groups = rules.classify(clean).sort_values("LE Delivery")["customer_group"].tolist()
+    assert groups == ["amazon", "sobeys_group"]
+
+
+def test_new_mappings_only_move_orders_out_of_other():
+    """Deliveries, totals and every other classification are untouched."""
+    buf_rows = [
+        {"Ship-to Name": "WALMART DC 6094", "Sales Order Total": "1500"},
+        {"Ship-to Name": "WESTERN GROCERS", "Carrier Description": "LOBLAWS PICK UP",
+         "Sales Order Total": "2500"},
+        {"Ship-to Name": "WESTERN GROCERS", "Sales Order Total": "3500"},
+        {"Ship-to Name": "SOBEYS 3012", "Sales Order Total": "4500"},
+    ]
+    result = _process(_rows(*buf_rows))
+    orders = result.orders.sort_values("LE Delivery")
+
+    assert orders["customer_group"].tolist() == [
+        "walmart", "loblaws", "other", "sobeys_group"]
+    assert orders["customer_display"].tolist() == [
+        "Walmart", "Loblaws", "Other / Unclassified", "Sobeys/Safeway/FreshCo"]
+    # No delivery gained or lost, no value gained or lost.
+    assert orders["LE Delivery"].nunique() == len(buf_rows) == len(orders)
+    assert orders["Sales Order Total"].sum() == 12000.0
+
+
+def test_new_mappings_do_not_change_risk_status():
+    """Walmart/Loblaws keep the fallback priority, so no order changes status."""
+    rows = [
+        {"Ship-to Name": "WALMART DC 6094"},
+        {"Ship-to Name": "SOME RECEIVER", "Carrier Description": "LOBLAWS PICKUP"},
+        {"Ship-to Name": "UNKNOWN CORNER STORE"},
+    ]
+    statuses = _process(_rows(*rows)).orders.sort_values("LE Delivery")["risk_status"]
+    # All three are the same order shape, so all three must land on one status.
+    assert statuses.nunique() == 1
+
+
+def test_walmart_and_loblaws_group_on_the_existing_issue_tracker():
+    result = _process(_rows(
+        # Late -> escalating, so both appear on the tracker as their own rows.
+        {"ys": "Calgary Warehouse", "Ship-to Name": "WALMART DC 6094",
+         "Planned Dlv. Date": "2026-07-10 23:00:00", "Sales Order Total": "1500"},
+        {"ys": "Calgary Warehouse", "Ship-to Name": "WESTERN GROCERS",
+         "Carrier Description": "LOBLAWS PICK UP",
+         "Planned Dlv. Date": "2026-07-10 23:00:00", "Sales Order Total": "2500"},
+    ))
+    tracker = result.issue_tracker
+    assert list(tracker.columns) == ISSUE_TRACKER_COLUMNS      # unchanged template
+    assert set(tracker["Customer"]) == {"Walmart", "Loblaws"}
+    assert "Other / Unclassified" not in set(tracker["Customer"])
+    assert tracker["Order Count"].sum() == 2
+    assert tracker["Total Price"].sum() == 4000.0
 
 
 def test_aw_matches_before_gfs():

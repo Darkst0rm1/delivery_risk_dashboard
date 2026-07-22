@@ -47,6 +47,18 @@ def _norm(value: Any) -> str:
     return _WS_RE.sub(" ", str(value)).strip().upper()
 
 
+def _norm_prefix(value: Any) -> str:
+    """Like :func:`_norm` but keeps a trailing space.
+
+    A startswith pattern such as ``"WM "`` has to stay word-delimited: stripped
+    to ``"WM"`` it would also match WMX / WMS style names. Existing patterns
+    ("AMZ", "FCL") carry no trailing space, so they normalize identically.
+    """
+    if _is_missing(value):
+        return ""
+    return _WS_RE.sub(" ", str(value)).lstrip().upper()
+
+
 @dataclass(frozen=True)
 class CustomerRule:
     key: str
@@ -188,7 +200,7 @@ def _rule_from_dict(d: dict[str, Any]) -> CustomerRule:
         owner=str(d.get("owner", "") or ""),
         consequence=str(d.get("consequence", "") or ""),
         ship_to_contains=tuple(_norm(x) for x in match.get("ship_to_contains", []) or []),
-        ship_to_startswith=tuple(_norm(x) for x in match.get("ship_to_startswith", []) or []),
+        ship_to_startswith=tuple(_norm_prefix(x) for x in match.get("ship_to_startswith", []) or []),
         carrier_contains=tuple(_norm(x) for x in match.get("carrier_contains", []) or []),
         amazon_deadline=bool(d.get("amazon_deadline", False)),
     )

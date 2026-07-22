@@ -129,6 +129,40 @@ customers:
     match:
       ship_to_contains: ["PRATT"]
 
+  # Walmart and Loblaws are listed last so every rule above keeps its current
+  # matches; these two only pick up orders that were falling through to the
+  # "Other / Unclassified" fallback. Their priority stays 3 (the fallback's
+  # value) so moving them out of Other regroups the Issue Tracker without
+  # changing any order's risk_status — priority 1 would additionally flag them
+  # via the customer-priority At Risk rule in risk_engine.
+  - key: walmart
+    display: "Walmart"
+    priority: 3
+    owner: ""
+    consequence: "Missed pickup or delivery window, customer out-of-stock risk, potential chargebacks and lost sales."
+    match:
+      # "WM " is a prefix rule only — a plain substring would catch unrelated
+      # names. The trailing space is significant and is preserved on load.
+      ship_to_contains: ["WALMART"]
+      ship_to_startswith: ["WM "]
+      carrier_contains: ["WALMART PICKUP", "WALMART PICK UP"]
+
+  - key: loblaws
+    display: "Loblaws"
+    priority: 3
+    owner: ""
+    consequence: "Missed pickup or delivery window, potential chargebacks, customer out-of-stock risk and lost sales."
+    match:
+      # Consignee-style ship-to names (WESTERN GROCERS, ATLANTIC FREEZER DIST
+      # CENTRE) are deliberately absent: those orders only count as Loblaws
+      # when the carrier identifies Loblaws, which the carrier patterns cover.
+      ship_to_contains: ["LOBLAW", "LOBLAWS"]
+      carrier_contains:
+        - "LOBLAWS PICK UP"
+        - "LOBLAW PICK UP"
+        - "LOBLAWS PICKUP"
+        - "LOBLAW PICKUP"
+
 # Fallback group for any unconfigured customer. Never removed.
 fallback:
   key: other
