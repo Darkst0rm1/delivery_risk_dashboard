@@ -30,25 +30,18 @@ ISSUE_TRACKER_COLUMNS = [
     "Due Date", "Status", "Total Price", "Order Count", "Latest Update", "Detail Report",
 ]
 
-# All Plants Summary column order.
+# All Plants Summary column order. Counts and their matching dollar figure in
+# pairs: the whole book, then the late orders, then the late orders split by
+# picking status. The three picking buckets partition the late orders exactly
+# (>=100 / 0<x<100 / 0), so they always add back to Late Orders / Late Value.
 SUMMARY_COLUMNS = [
-    "Site", "Total Orders", "Open Orders", "Critical", "At Risk", "Not Started",
-    "Late", "Route Departure Missed", "Issues",
+    "Site", "Total Orders", "Total Price $",
+    "Late Orders", "Late Value",
+    "Completed", "Completed $", "Partial", "Partial $", "Not Started", "Not Started $",
 ]
 
 # Label of the roll-up row at the bottom of the All Plants Summary.
 ALL_PLANTS = "All Plants"
-
-# "Late orders — picking" block, written below the All Plants Summary table.
-# The three picking buckets partition the late orders exactly (>=100 / 0<x<100
-# / 0), so the counts and values always add back to Late Orders / Late Value.
-LATE_PICKING_COLUMNS = [
-    "Site", "Late Orders", "Late Value",
-    "Completed", "Completed $", "Partial", "Partial $", "Not Started", "Not Started $",
-]
-
-# One-line headline block: the whole book, count and value.
-ORDER_TOTALS_COLUMNS = ["Total Orders", "Total Order Value"]
 
 # Not Started report column order.
 NOT_STARTED_COLUMNS = [
@@ -487,28 +480,7 @@ def build_site_sections(
 # ---------------------------------------------------------------------------
 # All Plants Summary
 # ---------------------------------------------------------------------------
-def _summary_row(label: str, orders: pd.DataFrame, tracker: pd.DataFrame) -> dict:
-    # Counts only — every dollar figure on this sheet lives in the blocks
-    # written below the table (see build_order_totals /
-    # build_late_picking_breakdown).
-    df = _unique_orders(orders)
-    not_started = df[df["is_not_started"]]
-    return {
-        "Site": label,
-        "Total Orders": int(df["LE Delivery"].nunique()),
-        "Open Orders": int(df.loc[df["is_open"], "LE Delivery"].nunique()),
-        "Critical": int(df.loc[df["risk_status"] == R.CRITICAL, "LE Delivery"].nunique()),
-        "At Risk": int(df.loc[df["risk_status"] == R.AT_RISK, "LE Delivery"].nunique()),
-        "Not Started": int(not_started["LE Delivery"].nunique()),
-        "Late": int(df.loc[df["is_late"], "LE Delivery"].nunique()),
-        "Route Departure Missed": int(
-            df.loc[df["is_route_departure_missed"], "LE Delivery"].nunique()),
-        "Issues": int(len(tracker)),
-    }
-
-
-def _late_picking_row(label: str, orders: pd.DataFrame) -> dict:
-    """One row of the late-orders picking breakdown."""
+def _summary_row(label: str, orders: pd.DataFrame) -> dict:
     df = _unique_orders(orders)
     late = df[df["is_late"]]
     # is_late already implies the order is open, so picking == 0 is exactly the
@@ -520,6 +492,8 @@ def _late_picking_row(label: str, orders: pd.DataFrame) -> dict:
     }
     row = {
         "Site": label,
+        "Total Orders": int(df["LE Delivery"].nunique()),
+        "Total Price $": float(df["Sales Order Total"].sum()),
         "Late Orders": int(late["LE Delivery"].nunique()),
         "Late Value": float(late["Sales Order Total"].sum()),
     }
@@ -529,32 +503,6 @@ def _late_picking_row(label: str, orders: pd.DataFrame) -> dict:
     return row
 
 
-def build_late_picking_breakdown(orders: pd.DataFrame, rules: Ruleset) -> pd.DataFrame:
-    """Late orders split by picking status — one row per warehouse plus a roll-up."""
-    if orders is None or orders.empty:
-        return pd.DataFrame(columns=LATE_PICKING_COLUMNS)
-
-    rows = []
-    for site in rules.ordered_sites(orders["site"]):
-        sub = orders[orders["site"] == site]
-        if sub.empty:
-            continue
-        rows.append(_late_picking_row(site, sub))
-    rows.append(_late_picking_row(ALL_PLANTS, orders))
-    return pd.DataFrame(rows)[LATE_PICKING_COLUMNS]
-
-
-def build_order_totals(orders: pd.DataFrame) -> pd.DataFrame:
-    """Single-row headline block: total order count and total order value."""
-    df = _unique_orders(orders)
-    if df is None or df.empty:
-        return pd.DataFrame([{"Total Orders": 0, "Total Order Value": 0.0}])[ORDER_TOTALS_COLUMNS]
-    return pd.DataFrame([{
-        "Total Orders": int(df["LE Delivery"].nunique()),
-        "Total Order Value": float(df["Sales Order Total"].sum()),
-    }])[ORDER_TOTALS_COLUMNS]
-
-
 def build_all_plants_summary(
     orders: pd.DataFrame,
     rules: Ruleset,
@@ -562,22 +510,17 @@ def build_all_plants_summary(
 ) -> pd.DataFrame:
     """One row per warehouse plus an ``All Plants`` roll-up row.
 
-    ``tracker`` is the All Plants Issue Tracker; its rows are attributed to a
-    warehouse by their Site column, so the "Issues" count on a warehouse row
-    always equals the number of rows on that warehouse's tracker sheet.
+    ``tracker`` is accepted (and ignored) so existing callers keep working —
+    the summary no longer reports an Issues count.
     """
     if orders is None or orders.empty:
         return pd.DataFrame(columns=SUMMARY_COLUMNS)
-    if tracker is None:
-        tracker = pd.DataFrame(columns=ISSUE_TRACKER_COLUMNS)
 
     rows = []
     for site in rules.ordered_sites(orders["site"]):
         sub = orders[orders["site"] == site]
         if sub.empty:
             continue
-        site_issues = (tracker[tracker["Site"] == site] if "Site" in tracker.columns
-                       else tracker.iloc[0:0])
-        rows.append(_summary_row(site, sub, site_issues))
-    rows.append(_summary_row(ALL_PLANTS, orders, tracker))
+        rows.append(_summary_row(site, sub))
+    rows.append(_summary_row(ALL_PLANTS, orders))
     return pd.DataFrame(rows)[SUMMARY_COLUMNS]
