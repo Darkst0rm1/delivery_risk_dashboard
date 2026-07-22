@@ -39,21 +39,17 @@ FILL_READY = PatternFill("solid", fgColor="D9EAD3")       # green-ish
 CURRENCY_FMT = '"$"#,##0'
 DATE_FMT = "MM/DD/YYYY"
 PCT_FMT = '0"%"'
-# Savings % is often a small share of a large book, so it keeps one decimal
-# rather than rounding a real 1.8% down to a flat "2%".
-PCT1_FMT = '0.0"%"'
 
 _CURRENCY_COLS = {
     "Total Price", "Sales Order Total",
-    "Total Order Value", "Adjusted Order Value", "Savings $",    # All Plants Summary
-    "Value at Risk", "Not Started Value",
+    "Total Order Value",                                         # Total orders block
+    "Late Value", "Completed $", "Partial $", "Not Started $",   # Late orders — picking
 }
 _DATE_COLS = {
     "Warehouse Task Creat", "Route Depart. Date", "Planned Dlv. Date",
     "Customer Dock Appointment Date", "Due Date",
 }
 _PCT_COLS = {"Picking in %", "picking_pct"}
-_PCT1_COLS = {"Savings %"}
 _WRAP_COLS = {"Issue", "Consequence / Risk", "Latest Update"}
 
 # Whole-number columns; listed so a blank cell writes 0 rather than an empty
@@ -63,6 +59,7 @@ _COUNT_COLS = {
     "Order Count", "Days to Route Departure", "Days to Planned Delivery",
     "Total Orders", "Open Orders", "Critical", "At Risk", "Not Started", "Late",
     "Route Departure Missed", "Issues",
+    "Late Orders", "Completed", "Partial",          # Late orders — picking block
 }
 
 AMZ_NOTE = ("HIGHLIGHTED ORDERS ARE CURRENTLY LATE AND MAY BE SUBJECT TO THE "
@@ -99,6 +96,66 @@ def _sanitize(value, is_numeric_col: bool):
     return value
 
 
+def _fmt_for(col: str) -> str | None:
+    """Number format for a column, by name. None = leave as General."""
+    if col in _CURRENCY_COLS:
+        return CURRENCY_FMT
+    if col in _DATE_COLS:
+        return DATE_FMT
+    if col in _PCT_COLS:
+        return PCT_FMT
+    return None
+
+
+def _numeric_cols(columns) -> set:
+    """Columns whose blanks should be written as 0 rather than an empty cell."""
+    return {c for c in columns
+            if c in _CURRENCY_COLS or c in _PCT_COLS or c in _COUNT_COLS}
+
+
+def _write_block(ws, title: str, df: pd.DataFrame, start_row: int) -> int:
+    """Write a titled sub-table under the main sheet table.
+
+    Returns the next free row (one blank row is left after the block).
+    """
+    ws.cell(row=start_row, column=1, value=title).font = TOTAL_FONT
+    r = start_row + 1
+    if df is None or df.empty:
+        ws.cell(row=r, column=1, value="No data")
+        return r + 2
+
+    columns = list(df.columns)
+    numeric = _numeric_cols(columns)
+    for i, col in enumerate(columns, start=1):
+        cell = ws.cell(row=r, column=i, value=col)
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    r += 1
+
+    records = df.to_dict("records")
+    for rec in records:
+        for i, col in enumerate(columns, start=1):
+            cell = ws.cell(row=r, column=i, value=_sanitize(rec.get(col), col in numeric))
+            fmt = _fmt_for(col)
+            if fmt:
+                cell.number_format = fmt
+        r += 1
+
+    # The roll-up sits on the last row of a multi-warehouse block; bold it the
+    # same way the main summary table bolds its All Plants row.
+    if len(records) > 1 and "Site" in columns:
+        for i in range(1, len(columns) + 1):
+            ws.cell(row=r - 1, column=i).font = TOTAL_FONT
+
+    # Widen only where this block needs more room than the table above.
+    for i, col in enumerate(columns, start=1):
+        letter = get_column_letter(i)
+        current = ws.column_dimensions[letter].width or 0
+        ws.column_dimensions[letter].width = min(max(current, len(str(col)) + 4, 14), 50)
+    return r + 1
+
+
 def _detail_highlight(row: dict, as_of_ts: pd.Timestamp):
     """Row fill for a customer detail sheet, from raw canonical columns."""
     gi = str(row.get("Goods Issue", "") or "").strip().upper()
@@ -126,17 +183,18 @@ def _write_sheet(
     priority_col: str | None = None,
     highlight_detail: bool = False,
     bold_last_row: bool = False,
+    extra_blocks: list | None = None,
 ) -> None:
     # `name` is expected to already be legal and unique (see SheetNamer) —
     # openpyxl would silently rename a clash, which would hide the bug.
     ws = wb.create_sheet(title=name)
     if df is None or df.empty:
         ws.append([f"No data for: {name}"])
+        _write_extra_blocks(ws, extra_blocks)
         return
 
     columns = list(df.columns)
-    numeric_cols = {c for c in columns
-                    if c in _CURRENCY_COLS or c in _PCT_COLS or c in _COUNT_COLS}
+    numeric_cols = _numeric_cols(columns)
 
     ws.append(columns)
     records = df.to_dict("records")
@@ -154,15 +212,7 @@ def _write_sheet(
     # Column formats + widths.
     for idx, col in enumerate(columns, start=1):
         letter = get_column_letter(idx)
-        fmt = None
-        if col in _CURRENCY_COLS:
-            fmt = CURRENCY_FMT
-        elif col in _DATE_COLS:
-            fmt = DATE_FMT
-        elif col in _PCT_COLS:
-            fmt = PCT_FMT
-        elif col in _PCT1_COLS:
-            fmt = PCT1_FMT
+        fmt = _fmt_for(col)
         if fmt:
             for r in range(2, len(records) + 2):
                 ws.cell(row=r, column=idx).number_format = fmt
@@ -213,6 +263,14 @@ def _write_sheet(
         c = ws.cell(row=note_row, column=1, value=note)
         c.font = NOTE_FONT
 
+    _write_extra_blocks(ws, extra_blocks)
+
+
+def _write_extra_blocks(ws, extra_blocks: list | None) -> None:
+    """Write each ``(title, dataframe)`` block below whatever is on the sheet."""
+    for title, block in extra_blocks or []:
+        _write_block(ws, title, block, ws.max_row + 2)
+
 
 def sheet_plan(result) -> list[tuple[str, object, dict]]:
     """``(requested name, dataframe, formatting kwargs)`` for every sheet, in order.
@@ -223,7 +281,9 @@ def sheet_plan(result) -> list[tuple[str, object, dict]]:
     without building a workbook.
     """
     plan: list[tuple[str, object, dict]] = [
-        ("All Plants Summary", result.all_plants_summary, {"bold_last_row": True}),
+        ("All Plants Summary", result.all_plants_summary,
+         {"bold_last_row": True,
+          "extra_blocks": list(getattr(result, "summary_blocks", []) or [])}),
         ("All Plants Issue Tracker", result.issue_tracker, {"status_col": "Status"}),
         ("All Plants Not Started", result.not_started, {"priority_col": "Priority"}),
     ]

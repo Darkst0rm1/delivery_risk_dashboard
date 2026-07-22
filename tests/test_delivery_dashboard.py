@@ -33,6 +33,7 @@ from delivery_dashboard.report_builder import (
     build_andrew_tab,
     build_andrew_tab_2,
     build_issue_tracker,
+    build_late_picking_breakdown,
     build_not_started,
 )
 from delivery_dashboard.sheet_names import (
@@ -545,46 +546,63 @@ def test_duplicate_delivery_is_not_double_counted_in_warehouse_figures():
     result = _process(buf)
     calgary = result.all_plants_summary[result.all_plants_summary["Site"] == "Calgary"].iloc[0]
     assert calgary["Total Orders"] == 1
-    assert calgary["Total Order Value"] == 1000.0
+    assert result.summary_blocks[0][1].iloc[0]["Total Order Value"] == 1000.0
     assert result.issue_tracker["Order Count"].sum() == 1
 
 
-def test_savings_is_picked_value_and_adjusted_is_the_remainder():
+def test_all_plants_summary_is_counts_only():
+    summary = _process(_multi_site()).all_plants_summary
+    money = [c for c in summary.columns
+             if "Value" in c or "Savings" in c or "$" in c]
+    assert money == []
+    assert list(summary.columns) == [
+        "Site", "Total Orders", "Open Orders", "Critical", "At Risk",
+        "Not Started", "Late", "Route Departure Missed", "Issues"]
+
+
+def test_late_picking_buckets_partition_the_late_orders():
     buf = _rows(
-        # Fully picked but the Goods Issue has not posted — still counts as
-        # savings, because these columns key on Picking in %, not Goods Issue.
-        {"ys": "Calgary Warehouse", "LE Delivery": "DONE1", "Sales Order Total": "2500",
-         "Goods Issue": "Not Started", "Picking in %": "100"},
-        {"ys": "Calgary Warehouse", "LE Delivery": "OPEN1", "Sales Order Total": "7500",
-         "Goods Issue": "Not Started", "Picking in %": "0"},
+        # Three late orders (planned date in the past, still open), one in each
+        # picking bucket, plus a future-dated order that must not appear.
+        {"ys": "Calgary Warehouse", "LE Delivery": "L1", "Sales Order Total": "1000",
+         "Planned Dlv. Date": "2026-07-10 00:00:00", "Picking in %": "100"},
+        {"ys": "Calgary Warehouse", "LE Delivery": "L2", "Sales Order Total": "2000",
+         "Planned Dlv. Date": "2026-07-10 00:00:00", "Picking in %": "50"},
+        {"ys": "Calgary Warehouse", "LE Delivery": "L3", "Sales Order Total": "4000",
+         "Planned Dlv. Date": "2026-07-10 00:00:00", "Picking in %": "0"},
+        {"ys": "Calgary Warehouse", "LE Delivery": "F1", "Sales Order Total": "9000",
+         "Planned Dlv. Date": "2026-08-30 00:00:00", "Picking in %": "0"},
     )
-    calgary = _process(buf).all_plants_summary.iloc[0]
-    assert calgary["Total Order Value"] == 10000.0
-    assert calgary["Savings $"] == 2500.0
-    assert calgary["Savings %"] == 25.0
-    # Adjusted Order Value is the value still open on the floor.
-    assert calgary["Adjusted Order Value"] == 7500.0
-    assert (calgary["Savings $"] + calgary["Adjusted Order Value"]
-            == calgary["Total Order Value"])
-    # Savings does not disturb the Goods-Issue-based open/risk figures.
-    assert calgary["Open Orders"] == 2
+    result = _process(buf)
+    row = build_late_picking_breakdown(result.orders, load_ruleset()).iloc[0]
+
+    assert row["Late Orders"] == 3
+    assert row["Late Value"] == 7000.0
+    assert (row["Completed"], row["Completed $"]) == (1, 1000.0)
+    assert (row["Partial"], row["Partial $"]) == (1, 2000.0)
+    assert (row["Not Started"], row["Not Started $"]) == (1, 4000.0)
+    # The buckets partition the late orders exactly.
+    assert row["Completed"] + row["Partial"] + row["Not Started"] == row["Late Orders"]
+    assert (row["Completed $"] + row["Partial $"] + row["Not Started $"]
+            == row["Late Value"])
 
 
-def test_partially_picked_orders_do_not_count_as_savings():
-    buf = _rows(
-        {"ys": "Calgary Warehouse", "LE Delivery": "PART1", "Sales Order Total": "4000",
-         "Goods Issue": "Not Started", "Picking in %": "80"},
-    )
-    calgary = _process(buf).all_plants_summary.iloc[0]
-    assert calgary["Savings $"] == 0.0
-    assert calgary["Adjusted Order Value"] == 4000.0
+def test_summary_blocks_are_written_under_the_all_plants_summary():
+    result = _process(_multi_site())
+    assert [title for title, _df in result.summary_blocks] == [
+        "Total orders", "Late orders — picking"]
 
+    totals = result.summary_blocks[0][1].iloc[0]
+    assert totals["Total Orders"] == len(result.orders)
+    assert totals["Total Order Value"] == result.orders["Sales Order Total"].sum()
 
-def test_savings_percent_is_zero_when_there_is_no_order_value():
-    buf = _rows({"ys": "Calgary Warehouse", "LE Delivery": "Z1", "Sales Order Total": "0"})
-    calgary = _process(buf).all_plants_summary.iloc[0]
-    assert calgary["Savings %"] == 0.0
-    assert calgary["Adjusted Order Value"] == 0.0
+    wb = load_workbook(io.BytesIO(build_workbook(result)))
+    ws = wb["All Plants Summary"]
+    labels = [ws.cell(row=r, column=1).value for r in range(1, ws.max_row + 1)]
+    assert "Total orders" in labels
+    assert "Late orders — picking" in labels
+    # The blocks sit below the summary table, not on top of it.
+    assert labels.index("Total orders") > labels.index("Site")
 
 
 def test_customer_reports_are_only_created_where_records_exist():
@@ -605,7 +623,6 @@ def test_all_plants_summary_rolls_up_every_warehouse():
     total = summary[summary["Site"] == ALL_PLANTS].iloc[0]
     per_site = summary[summary["Site"] != ALL_PLANTS]
     assert total["Total Orders"] == per_site["Total Orders"].sum() == len(result.orders)
-    assert total["Total Order Value"] == per_site["Total Order Value"].sum()
     assert total["Issues"] == len(result.issue_tracker)
 
 

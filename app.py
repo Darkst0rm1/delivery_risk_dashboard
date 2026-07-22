@@ -25,6 +25,7 @@ from delivery_dashboard.report_builder import (
     build_all_plants_summary,
     build_detail_reports,
     build_issue_tracker,
+    build_late_picking_breakdown,
     build_not_started,
     build_site_sections,
 )
@@ -185,19 +186,27 @@ with tab_exec:
 
     st.markdown("---")
 
+    st.markdown("**Late orders — picking**")
+    st.caption("The late orders split by how far picking has got. The three "
+               "buckets add back to Late Orders / Late Value.")
+    st.dataframe(
+        build_late_picking_breakdown(fdf, rules),
+        use_container_width=True, hide_index=True,
+        column_config={
+            "Late Value": st.column_config.NumberColumn(format="$%.0f"),
+            "Completed $": st.column_config.NumberColumn(format="$%.0f"),
+            "Partial $": st.column_config.NumberColumn(format="$%.0f"),
+            "Not Started $": st.column_config.NumberColumn(format="$%.0f"),
+        },
+    )
+
+    st.markdown("---")
+
     st.markdown("**All Plants Summary**")
     st.caption("One row per warehouse plus the roll-up — the first sheet in the download.")
     st.dataframe(
         build_all_plants_summary(fdf, rules, tracker_view),
         use_container_width=True, hide_index=True,
-        column_config={
-            "Savings $": st.column_config.NumberColumn(format="$%.0f"),
-            "Savings %": st.column_config.NumberColumn(format="%.1f%%"),
-            "Total Order Value": st.column_config.NumberColumn(format="$%.0f"),
-            "Adjusted Order Value": st.column_config.NumberColumn(format="$%.0f"),
-            "Value at Risk": st.column_config.NumberColumn(format="$%.0f"),
-            "Not Started Value": st.column_config.NumberColumn(format="$%.0f"),
-        },
     )
 
     st.markdown("---")

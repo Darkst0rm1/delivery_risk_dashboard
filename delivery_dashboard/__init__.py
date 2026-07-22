@@ -43,6 +43,8 @@ class ProcessResult:
     as_of: date
     site_sections: list = field(default_factory=list)          # list[SiteSection]
     all_plants_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
+    # (title, dataframe) blocks written under the All Plants Summary table.
+    summary_blocks: list = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -86,6 +88,10 @@ def process_export(
     reports = report_builder.build_detail_reports(orders, rules, as_of)
     site_sections = report_builder.build_site_sections(orders, rules, as_of, now=now)
     all_plants_summary = report_builder.build_all_plants_summary(orders, rules, issue_tracker)
+    summary_blocks = [
+        ("Total orders", report_builder.build_order_totals(orders)),
+        ("Late orders — picking", report_builder.build_late_picking_breakdown(orders, rules)),
+    ]
 
     warnings: list[str] = []
     # The whole workbook is organized by warehouse, so silently landing every
@@ -112,6 +118,7 @@ def process_export(
         as_of=as_of,
         site_sections=site_sections,
         all_plants_summary=all_plants_summary,
+        summary_blocks=summary_blocks,
         warnings=warnings,
         meta={
             "row_count": int(len(orders)),

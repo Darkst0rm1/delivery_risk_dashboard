@@ -33,13 +33,22 @@ ISSUE_TRACKER_COLUMNS = [
 # All Plants Summary column order.
 SUMMARY_COLUMNS = [
     "Site", "Total Orders", "Open Orders", "Critical", "At Risk", "Not Started",
-    "Late", "Route Departure Missed", "Issues", "Savings $", "Savings %",
-    "Total Order Value", "Adjusted Order Value",
-    "Value at Risk", "Not Started Value",
+    "Late", "Route Departure Missed", "Issues",
 ]
 
 # Label of the roll-up row at the bottom of the All Plants Summary.
 ALL_PLANTS = "All Plants"
+
+# "Late orders — picking" block, written below the All Plants Summary table.
+# The three picking buckets partition the late orders exactly (>=100 / 0<x<100
+# / 0), so the counts and values always add back to Late Orders / Late Value.
+LATE_PICKING_COLUMNS = [
+    "Site", "Late Orders", "Late Value",
+    "Completed", "Completed $", "Partial", "Partial $", "Not Started", "Not Started $",
+]
+
+# One-line headline block: the whole book, count and value.
+ORDER_TOTALS_COLUMNS = ["Total Orders", "Total Order Value"]
 
 # Not Started report column order.
 NOT_STARTED_COLUMNS = [
@@ -479,17 +488,11 @@ def build_site_sections(
 # All Plants Summary
 # ---------------------------------------------------------------------------
 def _summary_row(label: str, orders: pd.DataFrame, tracker: pd.DataFrame) -> dict:
+    # Counts only — every dollar figure on this sheet lives in the blocks
+    # written below the table (see build_order_totals /
+    # build_late_picking_breakdown).
     df = _unique_orders(orders)
-    escalating = df[df["risk_status"].isin(R.ESCALATION_STATUSES)]
     not_started = df[df["is_not_started"]]
-    # "Savings" = value already picked (Picking in % >= 100), whether or not the
-    # Goods Issue has posted. Subtracting it from Total Order Value leaves the
-    # value still to be picked, which is what Adjusted Order Value reports.
-    # NB: this is deliberately a different test from is_open / risk_status,
-    # which stay keyed on Goods Issue — only these three columns use picking.
-    completed = df[df["is_picking_complete"]]
-    total_value = float(df["Sales Order Total"].sum())
-    savings = float(completed["Sales Order Total"].sum())
     return {
         "Site": label,
         "Total Orders": int(df["LE Delivery"].nunique()),
@@ -501,13 +504,55 @@ def _summary_row(label: str, orders: pd.DataFrame, tracker: pd.DataFrame) -> dic
         "Route Departure Missed": int(
             df.loc[df["is_route_departure_missed"], "LE Delivery"].nunique()),
         "Issues": int(len(tracker)),
-        "Savings $": savings,
-        "Savings %": round(savings / total_value * 100, 1) if total_value else 0.0,
-        "Total Order Value": total_value,
-        "Adjusted Order Value": total_value - savings,
-        "Value at Risk": float(escalating["Sales Order Total"].sum()),
-        "Not Started Value": float(not_started["Sales Order Total"].sum()),
     }
+
+
+def _late_picking_row(label: str, orders: pd.DataFrame) -> dict:
+    """One row of the late-orders picking breakdown."""
+    df = _unique_orders(orders)
+    late = df[df["is_late"]]
+    # is_late already implies the order is open, so picking == 0 is exactly the
+    # "not started" bucket here and the three buckets cannot overlap.
+    buckets = {
+        "Completed": late[late["is_picking_complete"]],
+        "Partial": late[late["is_picking_in_progress"]],
+        "Not Started": late[late["is_not_started"]],
+    }
+    row = {
+        "Site": label,
+        "Late Orders": int(late["LE Delivery"].nunique()),
+        "Late Value": float(late["Sales Order Total"].sum()),
+    }
+    for name, sub in buckets.items():
+        row[name] = int(sub["LE Delivery"].nunique())
+        row[f"{name} $"] = float(sub["Sales Order Total"].sum())
+    return row
+
+
+def build_late_picking_breakdown(orders: pd.DataFrame, rules: Ruleset) -> pd.DataFrame:
+    """Late orders split by picking status — one row per warehouse plus a roll-up."""
+    if orders is None or orders.empty:
+        return pd.DataFrame(columns=LATE_PICKING_COLUMNS)
+
+    rows = []
+    for site in rules.ordered_sites(orders["site"]):
+        sub = orders[orders["site"] == site]
+        if sub.empty:
+            continue
+        rows.append(_late_picking_row(site, sub))
+    rows.append(_late_picking_row(ALL_PLANTS, orders))
+    return pd.DataFrame(rows)[LATE_PICKING_COLUMNS]
+
+
+def build_order_totals(orders: pd.DataFrame) -> pd.DataFrame:
+    """Single-row headline block: total order count and total order value."""
+    df = _unique_orders(orders)
+    if df is None or df.empty:
+        return pd.DataFrame([{"Total Orders": 0, "Total Order Value": 0.0}])[ORDER_TOTALS_COLUMNS]
+    return pd.DataFrame([{
+        "Total Orders": int(df["LE Delivery"].nunique()),
+        "Total Order Value": float(df["Sales Order Total"].sum()),
+    }])[ORDER_TOTALS_COLUMNS]
 
 
 def build_all_plants_summary(
